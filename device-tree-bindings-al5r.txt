@@ -1,0 +1,31 @@
+Allegro al5r video codec driver
+
+Required Properties:
+- compatible: "al,al5r"
+- reg: Address range of the codec IP registers
+- interrupt-parent: The phandle for the interrupt controller
+- interrupts: Should contain interrupt for codec IP
+
+Optional Properties:
+al,devicename: specifies the /dev/X name the created device should have.
+               default is that the /dev/X node isn't created.
+- memory-region: a phandle that points to a reserved-memory node. The driver will
+                 use the reserved memory instead of using the CMA pools to allocate
+                 its memory.
+al,regs_min_addr: specifies the offset at which the registers of the ip start
+                  in the mapped region. The default is 0.
+al,regs_min_addr_auto: Try to find what the offset of current IP is based on
+                       the knowledge of some of the IP we support.
+
+Example:
+
+al5r@a3c80000 {
+	compatible = "al,al5r";
+	reg = <0x0 0xa3c80000 0x0 0x80000>;
+	al,regs_min_addr = <0x8000>;
+	interrupts = <0x0 0x59 0x4>;
+	interrupt-parent = <0x4>;
+	memory-region = <&reserved_dma>;
+	al,devicename = "allegroIP";
+};
+

@@ -1,0 +1,44 @@
+Allegro al_codec video codec driver
+
+Required Properties:
+- compatible: "al,ale2xx" or "al,ald3xx" respectively for encoder and decoder
+- reg: Address range of the codec IP registers and address range where riscv
+core will have it's internal apb bus mapped (See below)
+- reg-names: must be "regs", "apb"
+- interrupt-parent: The phandle for the interrupt controller
+- interrupts: Should contain interrupt for codec IP
+
+Optional Properties:
+- al,devicename: specifies the /dev/X name the created device should have.
+- memory-region: a phandle that points to a reserved-memory node. The driver will
+                 use the reserved memory instead of using the CMA pools to allocate
+                 its memory.
+- clocks: Must contain an entry for each entry in clock-names.
+- clock-names: Should contain "mcu"; the mcu clock.
+
+Riscv internal apb
+riscv core has an internal apb bus that allow access to clint, plic and Ip
+registers. Address of this apb in riscv physical memory space can be set using
+index 1 of reg entry. Goal is to avoid clash with memory.
+Size must be 64M bytes and address must be aligned on 64M bytes.
+
+Example:
+
+ald3xx@0x83c80000 {
+	compatible = "al,ald3xx";
+	reg = <0x83c80000 0x80000>, <0xc8000000 0x08000000>;
+	reg-names = "regs", "apb";
+	interrupt-parent = <0x3>;
+	interrupts = <0x0 0x1d 0x4>;
+	al,devicename="al_d3xx";
+};
+
+ale2xx@0x83c00000 {
+	compatible = "al,ale2xx";
+	reg = <0x83c00000 0x80000>, <0xc0000000 0x08000000>;
+	reg-names = "regs", "apb";
+	interrupt-parent = <0x3>;
+	interrupts = <0x0 0x1d 0x4>;
+	al,devicename="al_e2xx";
+};
+
