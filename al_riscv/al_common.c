@@ -509,10 +509,12 @@ static void common_fw_callback(const struct firmware *fw, void *context)
 		break;
 	case MACHINE_ID_2:
 		dev->mem_check = common_mem_check_machine_id_2;
+#ifdef HACK_THIS_AS_IPP_STARTS_AT_0_FOR_DECODER
 		if (!common_get_perih_addr(dev)) {
 			common_err(dev, "machine_id_2 must define periph addr\n");
 			goto error_release;
 		}
+#endif
 		break;
 	default:
 		common_err(dev, "unsupported machine id %lld\n", bh.machine_id);
