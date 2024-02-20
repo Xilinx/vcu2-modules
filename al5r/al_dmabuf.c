@@ -14,6 +14,10 @@
 #include <linux/module.h>
 #include <linux/slab.h>
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,16,0)
+MODULE_IMPORT_NS(DMA_BUF);
+#endif
+
 MODULE_LICENSE("GPL v2");
 MODULE_AUTHOR("Kevin Grandemange");
 MODULE_AUTHOR("Sebastien Alaiwan");
@@ -188,7 +192,13 @@ static void *al5_dmabuf_kmap(struct dma_buf *dmabuf, unsigned long page_num)
 	return vaddr + page_num * PAGE_SIZE;
 }
 
+#if LINUX_VERSION_CODE > KERNEL_VERSION(5, 18, 0)
+static int al5_dmabuf_vmap(struct dma_buf *dbuf, struct iosys_map *map)
+#elif LINUX_VERSION_CODE > KERNEL_VERSION(5, 10, 0)
+static int al5_dmabuf_vmap(struct dma_buf *dbuf, struct dma_buf_map *map)
+#else
 static void *al5_dmabuf_vmap(struct dma_buf *dbuf)
+#endif
 {
 	struct al5_dmabuf_priv *dinfo = dbuf->priv;
 	void *vaddr = dinfo->buffer->cpu_handle;
