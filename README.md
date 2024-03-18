@@ -22,7 +22,7 @@ variable.
 $ ARCH=arm CROSS_COMPILE=arm-linux-gnueabihf- KDIR=linux-headers-dir make
 ```
 
-Compiled kernel modules are located in allegro/al_codec.ko and al5r/al5r.ko
+Compiled kernel modules are located in al_riscv/al_codec.ko and al5r/al5r.ko
 
 ## Using on a board with riscv fw
 

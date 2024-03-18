@@ -1,3 +1,0 @@
-obj-m += al_codec.o
-
-al_codec-y := al_codec_drv.o al_common.o al_buf.o al_codec_msg.o al_codec_mb.o

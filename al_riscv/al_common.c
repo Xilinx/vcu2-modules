@@ -12,6 +12,7 @@
 #include <linux/firmware.h>
 #include <linux/of_reserved_mem.h>
 #include <linux/slab.h>
+#include <linux/version.h>
 
 #include "al_buf.h"
 #include "al_codec_msg.h"
@@ -195,24 +196,24 @@ static int common_probe_check_and_setup_hw(struct al_common_dev *dev,
 static void common_dma_buf_insert(struct al_common_dev *dev,
 				  struct codec_dma_buf *buf)
 {
-	buf_insert(&dev->dlock, &dev->dma_buffers, buf);
+	buf_insert(&dev->dma_lock, &dev->dma_buffers, buf);
 }
 
 static void common_dma_buf_remove(struct al_common_dev *dev,
 				  struct codec_dma_buf *buf)
 {
-	buf_remove(&dev->dlock, buf);
+	buf_remove(&dev->dma_lock, buf);
 }
 
 static struct codec_dma_buf *common_dma_buf_lookup(struct al_common_dev *dev,
-						   dma_addr_t dma_handle)
+						   dma_addr_t dma_handle, bool remove)
 {
-	return buf_lookup(&dev->dlock, &dev->dma_buffers, dma_handle);
+	return buf_lookup(&dev->dma_lock, &dev->dma_buffers, dma_handle, remove);
 }
 
 static void common_dma_buf_cleanup(struct al_common_dev *dev)
 {
-	buf_cleanup_list(&dev->dlock, &dev->dma_buffers, &dev->pdev->dev);
+	buf_cleanup_list(&dev->dma_lock, &dev->dma_buffers, &dev->pdev->dev);
 }
 
 static void handle_get_cma_req(struct al_common_dev *dev,
@@ -274,7 +275,7 @@ static void handle_put_cma_req(struct al_common_dev *dev,
 		return;
 	}
 
-	buf = common_dma_buf_lookup(dev, req.phyAddr);
+	buf = common_dma_buf_lookup(dev, req.phyAddr, true);
 	common_dbg(dev, "req.phyAddr = %p => %p\n",
 		   (void *)(long)req.phyAddr, buf);
 	if (!buf) {
@@ -286,7 +287,6 @@ static void handle_put_cma_req(struct al_common_dev *dev,
 
 	dma_free_coherent(&dev->pdev->dev, buf->size, buf->cpu_mem,
 			  buf->dma_handle);
-	common_dma_buf_remove(dev, buf);
 	reply.reply.ret = 0;
 
 send_reply:
@@ -604,7 +604,7 @@ int al_common_probe(struct platform_device *pdev, struct al_common_dev *dev,
 	dev->pdev = pdev;
 	dev->map_in_kernel = map_in_kernel;
 	dev->mcu_clk_rate = 0;
-	mutex_init(&dev->dlock);
+	mutex_init(&dev->dma_lock);
 	INIT_LIST_HEAD(&dev->dma_buffers);
 	init_completion(&dev->done);
 
@@ -695,6 +695,31 @@ int al_common_send(struct al_common_dev *dev, struct msg_itf_header *hdr)
 			      dev);
 }
 
+void *common_dma_alloc_noncoherent(struct al_common_dev *dev, size_t size,
+		       dma_addr_t *dma_handle, gfp_t flag)
+{
+	void *cpu_mem;
+
+	BUG_ON(!dev->mem_check);
+#if LINUX_VERSION_CODE > KERNEL_VERSION(5, 10, 0)
+	cpu_mem = dma_alloc_noncoherent(&dev->pdev->dev, size, dma_handle, DMA_BIDIRECTIONAL, flag);
+#else
+	cpu_mem = dma_alloc_attrs(&dev->pdev->dev, size, dma_handle, flag, DMA_ATTR_NON_CONSISTENT);
+#endif
+	if (!cpu_mem || dev->mem_check(dev, *dma_handle, size))
+		return cpu_mem;
+
+	common_dbg(dev, "mem check failed for %pad of size %zu\n", dma_handle,
+		   size);
+#if LINUX_VERSION_CODE > KERNEL_VERSION(5, 10, 0)
+	dma_free_noncoherent(&dev->pdev->dev, size, cpu_mem, *dma_handle, DMA_BIDIRECTIONAL);
+#else
+	dma_free_attrs(&dev->pdev->dev, size, cpu_mem, *dma_handle, DMA_ATTR_NON_CONSISTENT);
+#endif
+
+	return NULL;
+}
+
 void *common_dma_alloc(struct al_common_dev *dev, size_t size,
 		       dma_addr_t *dma_handle, gfp_t flag)
 {
@@ -717,20 +742,19 @@ int al_common_dma_buf_free(struct al_common_dev *dev, uint64_t phy_addr)
 {
 	struct codec_dma_buf *buf;
 
-	buf = common_dma_buf_lookup(dev, phy_addr);
+	buf = common_dma_buf_lookup(dev, phy_addr, true);
 	if (!buf)
 		return -EINVAL;
 
 	dma_free_coherent(&dev->pdev->dev, buf->size, buf->cpu_mem,
 			  buf->dma_handle);
 
-	common_dma_buf_remove(dev, buf);
 
 	return 0;
 }
 
 int al_common_dma_buf_map(struct al_common_dev *dev, struct vm_area_struct *vma)
 {
-	return buf_map(&dev->dlock, &dev->dma_buffers, vma,
+	return buf_map(&dev->dma_lock, &dev->dma_buffers, vma,
 		       &dev->pdev->dev);
 }

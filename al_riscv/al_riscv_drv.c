@@ -5,6 +5,7 @@
 ******************************************************************************/
 
 #include <linux/delay.h>
+#include <linux/dma-buf.h>
 #include <linux/dma-mapping.h>
 #include <linux/firmware.h>
 #include <linux/interrupt.h>
@@ -17,11 +18,15 @@
 #include <linux/platform_device.h>
 #include <linux/slab.h>
 #include <linux/uaccess.h>
+#include <linux/version.h>
+
 
 #include "al_buf.h"
 #include "al_codec_mb.h"
 #include "al_codec_msg.h"
 #include "al_common.h"
+#include "al_dmabuf.h"
+#include "al_riscv_drv.h"
 
 #include "msg_common_itf.h"
 #include "codec_uapi.h"
@@ -50,20 +55,6 @@ struct codec_cmd {
 	void *reply;
 };
 
-struct codec_client {
-	struct kref refcount;
-	struct list_head list;
-	struct codec_dev *dev;
-	struct file *file;
-	struct mutex elock;
-	struct list_head events;
-	struct mutex clock;
-	struct list_head cmds;
-	wait_queue_head_t event_queue;
-	struct mutex dlock;
-	struct list_head dma_buffers;
-};
-
 struct codec_event_wrapper {
 	struct list_head list;
 	uint32_t type;
@@ -78,7 +69,7 @@ struct codec_dev {
 	char misc_name[MAX_MISC_NAME];
 	int is_misc_init_done;
 
-	struct mutex clock;
+	struct mutex client_lock;
 	struct list_head clients;
 };
 
@@ -115,22 +106,22 @@ static inline int is_type_event(uint16_t type)
 	return 1;
 }
 
-static void client_dma_buf_insert(struct codec_client *client,
+void client_dma_buf_insert(struct codec_client *client,
 				  struct codec_dma_buf *buf)
 {
-	buf_insert(&client->dlock, &client->dma_buffers, buf);
+	buf_insert(&client->dma_lock, &client->dma_buffers, buf);
 }
 
-static struct codec_dma_buf *client_dma_buf_lookup(struct codec_client *client,
-						   dma_addr_t dma_handle)
+struct codec_dma_buf *client_dma_buf_lookup(struct codec_client *client,
+						   dma_addr_t dma_handle, bool remove)
 {
-	return buf_lookup(&client->dlock, &client->dma_buffers, dma_handle);
+	return buf_lookup(&client->dma_lock, &client->dma_buffers, dma_handle, remove);
 }
 
-static void client_dma_buf_remove(struct codec_client *client,
+void client_dma_buf_remove(struct codec_client *client,
 				  struct codec_dma_buf *buf)
 {
-	buf_remove(&client->dlock, buf);
+	buf_remove(&client->dma_lock, buf);
 }
 
 static int client_create_and_insert(struct codec_dev *dev, struct file *file)
@@ -146,17 +137,17 @@ static int client_create_and_insert(struct codec_dev *dev, struct file *file)
 	kref_init(&client->refcount);
 	client->dev = dev;
 	client->file = file;
-	mutex_init(&client->elock);
-	mutex_init(&client->clock);
-	mutex_init(&client->dlock);
+	mutex_init(&client->event_lock);
+	mutex_init(&client->client_lock);
+	mutex_init(&client->dma_lock);
 	INIT_LIST_HEAD(&client->events);
 	INIT_LIST_HEAD(&client->cmds);
 	INIT_LIST_HEAD(&client->dma_buffers);
 	init_waitqueue_head(&client->event_queue);
 
-	mutex_lock(&dev->clock);
+	mutex_lock(&dev->client_lock);
 	list_add(&client->list, &dev->clients);
-	mutex_unlock(&dev->clock);
+	mutex_unlock(&dev->client_lock);
 
 	codec_info(dev, "New client %p for %p\n", client, file);
 
@@ -184,7 +175,7 @@ static void client_cleanup(struct kref *ref)
 		codec_err(dev, "cmds list not empty\n");
 
 	client_cleanup_event_list(&client->events);
-	buf_cleanup_list(&client->dlock, &client->dma_buffers,
+	buf_cleanup_list(&client->dma_lock, &client->dma_buffers,
 			 &dev->common.pdev->dev);
 
 	kfree(client);
@@ -196,14 +187,14 @@ static struct codec_client *client_lookup(struct codec_dev *dev,
 	struct codec_client *res = NULL;
 	struct codec_client *client;
 
-	mutex_lock(&dev->clock);
+	mutex_lock(&dev->client_lock);
 	list_for_each_entry(client, &dev->clients, list) {
 		if (client->file != file)
 			continue;
 		res = client;
 		break;
 	}
-	mutex_unlock(&dev->clock);
+	mutex_unlock(&dev->client_lock);
 
 	return res;
 }
@@ -213,7 +204,7 @@ static struct codec_client *client_get(struct codec_dev *dev, uint64_t hdl)
 	struct codec_client *res = NULL;
 	struct codec_client *client;
 
-	mutex_lock(&dev->clock);
+	mutex_lock(&dev->client_lock);
 	list_for_each_entry(client, &dev->clients, list) {
 		if (client != hdl_2_ptr(hdl))
 			continue;
@@ -221,7 +212,7 @@ static struct codec_client *client_get(struct codec_dev *dev, uint64_t hdl)
 		kref_get(&client->refcount);
 		break;
 	}
-	mutex_unlock(&dev->clock);
+	mutex_unlock(&dev->client_lock);
 
 	return res;
 }
@@ -251,9 +242,9 @@ static void client_remove(struct codec_dev *dev, struct codec_client *client)
 {
 	codec_info(dev, "Remove client %p for %p\n", client, client->file);
 
-	mutex_lock(&dev->clock);
+	mutex_lock(&dev->client_lock);
 	list_del(&client->list);
-	mutex_unlock(&dev->clock);
+	mutex_unlock(&dev->client_lock);
 
 	client_notify_fw(dev, client);
 
@@ -287,9 +278,9 @@ static struct codec_cmd *cmd_create_and_insert(struct codec_client *client,
 	cmd->reply_size = cmd_reply->reply_size;
 	init_completion(&cmd->done);
 
-	mutex_lock(&client->clock);
+	mutex_lock(&client->client_lock);
 	list_add(&cmd->list, &client->cmds);
-	mutex_unlock(&client->clock);
+	mutex_unlock(&client->client_lock);
 
 	return cmd;
 }
@@ -299,7 +290,7 @@ static struct codec_cmd *cmd_get(struct codec_client *client, uint64_t hdl)
 	struct codec_cmd *res = NULL;
 	struct codec_cmd *cmd;
 
-	mutex_lock(&client->clock);
+	mutex_lock(&client->client_lock);
 	list_for_each_entry(cmd, &client->cmds, list) {
 		if (cmd != hdl_2_ptr(hdl))
 			continue;
@@ -307,7 +298,7 @@ static struct codec_cmd *cmd_get(struct codec_client *client, uint64_t hdl)
 		kref_get(&cmd->refcount);
 		break;
 	}
-	mutex_unlock(&client->clock);
+	mutex_unlock(&client->client_lock);
 
 	return res;
 }
@@ -319,9 +310,9 @@ static void cmd_put(struct codec_cmd *cmd)
 
 static void cmd_remove(struct codec_client *client, struct codec_cmd *cmd)
 {
-	mutex_lock(&client->clock);
+	mutex_lock(&client->client_lock);
 	list_del(&cmd->list);
-	mutex_unlock(&client->clock);
+	mutex_unlock(&client->client_lock);
 
 	cmd_put(cmd);
 }
@@ -350,8 +341,8 @@ static int codec_release(struct inode *inode, struct file *file)
 }
 
 static int codec_ioctl_cmd_reply(struct codec_dev *dev,
-				 struct codec_client *client,
-				 unsigned long arg)
+				 unsigned long arg,
+				 struct codec_client *client)
 {
 	void __user *ubuf = (void __user *)arg;
 	struct msg_itf_header *req = NULL;
@@ -403,6 +394,30 @@ error:
 	return ret;
 }
 
+static struct codec_dma_buf *codec_dma_alloc(struct codec_dev *dev, struct codec_dma_info* info){
+	struct codec_dma_buf *buf;
+
+	buf = kmalloc(sizeof(*buf), GFP_KERNEL);
+	if (!buf)
+		return ERR_PTR(-ENOMEM);
+
+	buf->size = info->size;
+	buf->is_kernel_mapped = map_in_kernel;
+	buf->is_coherent = true;
+	buf->dmabuf_handle = NULL;
+	buf->cpu_mem = common_dma_alloc(&dev->common, info->size,
+					&buf->dma_handle, GFP_KERNEL);
+	info->phy_addr = buf->dma_handle;
+	info->offset = buf->dma_handle;
+
+	if (!buf->cpu_mem) {
+		kfree(buf);
+		return ERR_PTR(-ENOMEM);
+	}
+
+	return buf;
+}
+
 static int codec_ioctl_dma_alloc(struct codec_dev *dev, unsigned long arg,
 				 struct codec_client *client)
 {
@@ -415,21 +430,7 @@ static int codec_ioctl_dma_alloc(struct codec_dev *dev, unsigned long arg,
 	if (ret)
 		return ret;
 
-	buf = kmalloc(sizeof(*buf), GFP_KERNEL);
-	if (!buf)
-		return -ENOMEM;
-
-	buf->size = info.size;
-	buf->is_kernel_mapped = map_in_kernel;
-	buf->cpu_mem = common_dma_alloc(&dev->common, info.size,
-					&buf->dma_handle, GFP_KERNEL);
-	info.phy_addr = buf->dma_handle;
-	info.offset = buf->dma_handle;
-
-	if (!buf->cpu_mem) {
-		kfree(buf);
-		return -ENOMEM;
-	}
+	buf = codec_dma_alloc(dev, &info);
 
 	ret = copy_to_user(ubuf, &info, sizeof(info));
 	if (ret) {
@@ -437,6 +438,44 @@ static int codec_ioctl_dma_alloc(struct codec_dev *dev, unsigned long arg,
 				  buf->cpu_mem,
 				  buf->dma_handle);
 		kfree(buf);
+		return ret;
+	}
+
+	client_dma_buf_insert(client, buf);
+
+	return 0;
+}
+
+
+
+static int codec_ioctl_dma_alloc_w_fd(struct codec_dev *dev, unsigned long arg,
+				 struct codec_client *client)
+{
+	void __user *ubuf = (void __user *)arg;
+	struct codec_dma_info info;
+	struct codec_dma_buf *buf;
+	struct dma_buf *dma_buf;
+	int ret;
+
+	ret = copy_from_user(&info, ubuf, sizeof(info));
+	if (ret)
+		return ret;
+
+	buf = codec_dma_alloc(dev, &info);
+
+	dma_buf = codec_dmabuf_wrap(&dev->common.pdev->dev, info.size, buf, client);
+
+	if (IS_ERR(dma_buf))
+		return PTR_ERR(dma_buf);
+	
+	buf->dmabuf_handle = dma_buf;
+	info.fd = dma_buf_fd(dma_buf, O_RDWR);
+
+	ret = copy_to_user(ubuf, &info, sizeof(info));
+	if (ret) {
+		buf_free_dma_coherent(&dev->common.pdev->dev, buf);
+		kfree(buf);
+		return ret;
 	}
 
 	client_dma_buf_insert(client, buf);
@@ -456,14 +495,13 @@ static int codec_ioctl_dma_free(struct codec_dev *dev, unsigned long arg,
 	if (ret)
 		return ret;
 
-	buf = client_dma_buf_lookup(client, info.phy_addr);
+	buf = client_dma_buf_lookup(client, info.phy_addr, true);
 	if (!buf)
 		return -EINVAL;
 
-	dma_free_coherent(&dev->common.pdev->dev, buf->size, buf->cpu_mem,
-			  buf->dma_handle);
 
-	client_dma_buf_remove(client, buf);
+	buf_free_dma(&dev->common.pdev->dev, buf);
+	kfree(buf);
 
 	return 0;
 }
@@ -485,8 +523,8 @@ static int codec_ioctl_dma_free_mcu(struct codec_dev *dev, unsigned long arg)
 }
 
 static int codec_ioctl_get_event(struct codec_dev *dev,
-				 struct codec_client *client,
-				 unsigned long arg)
+				 unsigned long arg,
+				 struct codec_client *client)
 {
 	void __user *ubuf = (void __user *)arg;
 	struct codec_event event;
@@ -497,9 +535,9 @@ static int codec_ioctl_get_event(struct codec_dev *dev,
 	if (ret)
 		return -EINVAL;
 
-	mutex_lock(&client->elock);
+	mutex_lock(&client->event_lock);
 	while (list_empty(&client->events)) {
-		mutex_unlock(&client->elock);
+		mutex_unlock(&client->event_lock);
 		ret = wait_event_interruptible_timeout(client->event_queue,
 						       !list_empty(&client->events),
 						       HZ);
@@ -507,11 +545,11 @@ static int codec_ioctl_get_event(struct codec_dev *dev,
 			return ret;
 		if (ret == 0)
 			return -ETIMEDOUT;
-		mutex_lock(&client->elock);
+		mutex_lock(&client->event_lock);
 	}
 	evt = list_entry(client->events.next, struct codec_event_wrapper, list);
 	list_del(&evt->list);
-	mutex_unlock(&client->elock);
+	mutex_unlock(&client->event_lock);
 
 	ret = copy_to_user(event.event, evt->payload, evt->payload_len);
 	if (ret) {
@@ -526,6 +564,52 @@ static int codec_ioctl_get_event(struct codec_dev *dev,
 	return ret;
 }
 
+static int codec_ioctl_get_physical_address(struct codec_dev *dev, unsigned long arg,
+				struct codec_client *client) 
+{
+	struct codec_dma_info info;
+	struct dma_buf *dbuf;
+	struct dma_buf_attachment *attach;
+	struct sg_table *sgt;
+	int err = 0;
+
+	if (copy_from_user(&info, (struct al5_dma32_info *)arg, sizeof(info)))
+		return -EFAULT;
+
+
+	dbuf = dma_buf_get(info.fd);
+	if (IS_ERR(dbuf))
+		return -EINVAL;
+	attach = dma_buf_attach(dbuf, &dev->common.pdev->dev);
+	if (IS_ERR(attach)) {
+		err = -EINVAL;
+		goto fail_attach;
+	}
+	sgt = dma_buf_map_attachment(attach, DMA_BIDIRECTIONAL);
+	if (IS_ERR(sgt)) {
+		err = -EINVAL;
+		goto fail_map;
+	}
+
+	info.phy_addr = sg_dma_address(sgt->sgl);
+	info.offset = info.phy_addr;
+
+	dma_buf_unmap_attachment(attach, sgt, DMA_BIDIRECTIONAL);
+fail_map:
+	dma_buf_detach(dbuf, attach);
+fail_attach:
+	dma_buf_put(dbuf);
+
+	if(err)
+		return err;
+
+	if (copy_to_user((void *)arg, &info, sizeof(info)))
+		return -EFAULT;
+
+	return 0;
+}
+
+
 static long codec_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
 	struct codec_dev *dev = container_of(file->private_data, struct codec_dev,
@@ -538,22 +622,36 @@ static long codec_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 
 	switch (cmd) {
 	case CODEC_FW_CMD_REPLY:
-		ret = codec_ioctl_cmd_reply(dev, client, arg);
+		ret = codec_ioctl_cmd_reply(dev, arg, client);
 		break;
 	case CODEC_DMA_ALLOC:
 		ret = codec_ioctl_dma_alloc(dev, arg, client);
+		break;
+	case CODEC_DMA_ALLOC_WITH_FD:
+		ret = codec_ioctl_dma_alloc_w_fd(dev, arg, client);
 		break;
 	case CODEC_DMA_FREE:
 		ret = codec_ioctl_dma_free(dev, arg, client);
 		break;
 	case CODEC_GET_EVENT:
-		ret = codec_ioctl_get_event(dev, client, arg);
+		ret = codec_ioctl_get_event(dev, arg, client);
 		break;
 	case CODEC_DMA_FREE_MCU:
 		ret = codec_ioctl_dma_free_mcu(dev, arg);
 		break;
+	case CODEC_DMA_GET_PHY:
+		ret = codec_ioctl_get_physical_address(dev, arg, client);
+		break;
 	default:
 		codec_err(dev, "unknown ioctl %x\n", cmd);
+		codec_err(dev, "Existing ioctls:\n");
+		codec_err(dev, "CODEC_FW_CMD_REPLY		:%lx\n",	CODEC_FW_CMD_REPLY);
+		codec_err(dev, "CODEC_DMA_ALLOC			:%lx\n",	CODEC_DMA_ALLOC);
+		codec_err(dev, "CODEC_DMA_ALLOC_WITH_FD	:%lx\n",	CODEC_DMA_ALLOC_WITH_FD);
+		codec_err(dev, "CODEC_DMA_FREE			:%lx\n",	CODEC_DMA_FREE);
+		codec_err(dev, "CODEC_GET_EVENT			:%lx\n",	CODEC_GET_EVENT);
+		codec_err(dev, "CODEC_DMA_FREE_MCU 		:%lx\n",	CODEC_DMA_FREE_MCU);
+		codec_err(dev, "CODEC_DMA_GET_PHY 		:%lx\n",	CODEC_DMA_GET_PHY);
 		ret = -EINVAL;
 	}
 
@@ -570,8 +668,9 @@ static int codec_mmap(struct file *file, struct vm_area_struct *vma)
 	if (!client)
 		return -ENODEV;
 
-	ret = buf_map(&client->dlock, &client->dma_buffers, vma,
+	ret = buf_map(&client->dma_lock, &client->dma_buffers, vma,
 		      &dev->common.pdev->dev);
+	
 	if (ret)
 		return al_common_dma_buf_map(&dev->common, vma);
 
@@ -665,9 +764,9 @@ static void handle_evt(struct codec_dev *dev, struct msg_itf_header *hdr,
 		return;
 	}
 
-	mutex_lock(&client->elock);
+	mutex_lock(&client->event_lock);
 	list_add_tail(&evt->list, &client->events);
-	mutex_unlock(&client->elock);
+	mutex_unlock(&client->event_lock);
 	wake_up_interruptible(&client->event_queue);
 
 	client_put(client);
@@ -744,7 +843,7 @@ static int codec_probe(struct platform_device *pdev)
 	dev = devm_kzalloc(&pdev->dev, sizeof(*dev), GFP_KERNEL);
 	if (!dev)
 		return -ENOMEM;
-	mutex_init(&dev->clock);
+	mutex_init(&dev->client_lock);
 	INIT_LIST_HEAD(&dev->clients);
 
 	dev->common.cb_arg = dev;
