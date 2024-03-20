@@ -4,12 +4,15 @@
 *
 ******************************************************************************/
 
+#include "al_dmabuf.h"
+
 #include <linux/dma-buf.h>
 #include <linux/slab.h>
 #include <linux/version.h>
 
-
-#include "al_dmabuf.h"
+#if LINUX_VERSION_CODE > KERNEL_VERSION(5,15,0)
+MODULE_IMPORT_NS(DMA_BUF);
+#endif
 
 struct codec_dma_buf_priv {
 	struct codec_dma_buf *buffer;
