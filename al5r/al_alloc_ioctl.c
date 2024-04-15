@@ -132,7 +132,7 @@ int al5_ioctl_get_dma64_mmap(struct device *dev, struct al5r_codec_chan *chan,
 
 	info.phy_addr = buf->dma_handle;
 
-	pr_info("allocated buffer cpu: %p, phy:%d, offset:%d\n", buf->cpu_handle,
+	pr_info("allocated buffer cpu: %p, phy:%llu, offset:%d\n", buf->cpu_handle,
 		info.phy_addr, info.fd);
 
 	if (copy_to_user((void *)arg, &info, sizeof(info)))
