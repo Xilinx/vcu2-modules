@@ -1,3 +1,5 @@
-obj-m += al_codec.o
+obj-m += ale2_riscv.o
+obj-m += ald3_riscv.o
 
-al_codec-y := al_riscv_drv.o al_common.o al_buf.o al_dmabuf.o al_codec_msg.o al_codec_mb.o
+ale2_riscv-y := al_riscv_wrap_enc.o al_riscv_drv_common.o al_common.o al_buf.o al_dmabuf.o al_codec_msg.o al_codec_mb.o
+ald3_riscv-y := al_riscv_wrap_dec.o al_riscv_drv_common.o al_common.o al_buf.o al_dmabuf.o al_codec_msg.o al_codec_mb.o

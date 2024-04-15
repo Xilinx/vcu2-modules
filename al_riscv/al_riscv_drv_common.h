@@ -8,7 +8,14 @@
 #define __AL_RISCV_DRV__
 
 #include <linux/dma-mapping.h>
+#include <linux/platform_device.h>
 
+#include "al_buf.h"
+
+typedef struct {
+	const char *fw_name;
+	const char *default_device_name;
+} al_riscv_device_data;
 
 struct codec_client {
 	struct kref refcount;
@@ -35,5 +42,8 @@ struct codec_dma_buf *client_dma_buf_lookup(struct codec_client *client,
 						   dma_addr_t dma_handle, bool remove);
 
 void client_dma_buf_remove(struct codec_client *client, struct codec_dma_buf *buf);
+
+int al_riscv_codec_probe(struct platform_device *pdev);
+int al_riscv_codec_remove(struct platform_device *pdev);
 
 #endif
