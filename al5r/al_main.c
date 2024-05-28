@@ -707,7 +707,11 @@ static struct platform_driver al5r_platform_driver = {
 
 static int create_module_class(void)
 {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0)
+	module_class = class_create("al5r_class");
+#else
 	module_class = class_create(THIS_MODULE, "al5r_class");
+#endif
 	if (IS_ERR(module_class))
 		return PTR_ERR(module_class);
 
