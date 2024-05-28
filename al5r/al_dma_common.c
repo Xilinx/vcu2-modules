@@ -6,6 +6,7 @@
 
 #include <linux/mm.h>
 #include <linux/dma-mapping.h>
+#include <linux/version.h>
 
 #include "al_dma_common.h"
 
@@ -52,8 +53,12 @@ int al5_dma_common_mmap(struct device *dev, struct vm_area_struct *vma,
 
 	vma->vm_private_data = buf;
 	vma->vm_ops = &al5_vm_ops;
-	vma->vm_flags |= VM_DONTEXPAND | VM_DONTDUMP;
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 3, 0)
+	vm_flags_set(vma, VM_DONTEXPAND | VM_DONTDUMP);
+#else
+	vma->vm_flags |= VM_DONTEXPAND | VM_DONTDUMP;
+#endif
 	return 0;
 }
 
