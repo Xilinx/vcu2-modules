@@ -207,6 +207,8 @@ static void codec_dmabuf_release(struct dma_buf *dbuf)
 	kfree(dinfo);
 }
 
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 8, 0)
 static void *al5_dmabuf_kmap(struct dma_buf *dbuf, unsigned long page_num)
 {
 	struct codec_dma_buf_priv *dinfo = dbuf->priv;
@@ -214,6 +216,7 @@ static void *al5_dmabuf_kmap(struct dma_buf *dbuf, unsigned long page_num)
 
 	return vaddr + page_num * PAGE_SIZE;
 }
+#endif
 
 #if LINUX_VERSION_CODE > KERNEL_VERSION(5, 18, 0)
 static int codec_dmabuf_vmap(struct dma_buf *dbuf, struct iosys_map *map)

@@ -498,7 +498,7 @@ static int codec_ioctl_dma_free(struct codec_dev *dev, unsigned long arg,
 		return -EINVAL;
 
 
-	buf_free_dma(&dev->common.pdev->dev, buf);
+	buf_free_dma_coherent(&dev->common.pdev->dev, buf);
 	kfree(buf);
 
 	return 0;

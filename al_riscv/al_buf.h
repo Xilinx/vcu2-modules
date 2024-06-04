@@ -28,10 +28,7 @@ struct codec_dma_buf *buf_lookup(struct mutex *lock, struct list_head *head,
 				 dma_addr_t dma_handle, bool remove);
 
 
-void  buf_free_dma_noncoherent(struct device *dev, struct codec_dma_buf *buf);
-void  buf_free_dma_coherent(struct device *dev, struct codec_dma_buf *buf);
-void buf_free_dma(struct device *dev, struct codec_dma_buf *buf);
-
+void buf_free_dma_coherent(struct device *dev, struct codec_dma_buf *buf);
 void buf_cleanup_list(struct mutex *lock, struct list_head *head,
 		      struct device *dev);
 int buf_map(struct mutex *lock, struct list_head *head,
