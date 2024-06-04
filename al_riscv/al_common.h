@@ -48,8 +48,6 @@ int al_common_remove(struct al_common_dev *dev);
 int al_common_get_header(struct al_common_dev *dev, struct msg_itf_header *hdr);
 int al_common_get_data(struct al_common_dev *dev, char *data, int len);
 int al_common_send(struct al_common_dev *dev, struct msg_itf_header *hdr);
-void *common_dma_alloc_noncoherent(struct al_common_dev *dev, size_t size,
-		       dma_addr_t *dma_handle, gfp_t flag);
 void *common_dma_alloc(struct al_common_dev *dev, size_t size,
 		       dma_addr_t *dma_handle, gfp_t flag);
 int al_common_dma_buf_free(struct al_common_dev *dev, uint64_t phy_addr);

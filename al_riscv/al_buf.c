@@ -73,29 +73,10 @@ struct codec_dma_buf *buf_lookup(struct mutex *lock,
 	return res;
 }
 
-
-inline void buf_free_dma_noncoherent(struct device *dev, struct codec_dma_buf *buf){
-#if LINUX_VERSION_CODE > KERNEL_VERSION(5, 10, 0)
-	dma_free_noncoherent(dev, buf->size, buf->cpu_mem,
-			buf->dma_handle, DMA_BIDIRECTIONAL);
-#else
-	dma_free_attrs(dev, buf->size, buf->cpu_mem,
-			buf->dma_handle, DMA_ATTR_NON_CONSISTENT);
-#endif
-}
-
 inline void buf_free_dma_coherent(struct device *dev, struct codec_dma_buf *buf)
 {
 	dma_free_coherent(dev, buf->size, buf->cpu_mem,
 						buf->dma_handle);
-}
-
-inline void buf_free_dma(struct device *dev, struct codec_dma_buf *buf)
-{
-	if(buf->is_coherent)
-		buf_free_dma_coherent(dev, buf);
-	else
-		buf_free_dma_noncoherent(dev, buf);
 }
 
 void buf_cleanup_list(struct mutex *lock, struct list_head *head,
@@ -106,11 +87,9 @@ void buf_cleanup_list(struct mutex *lock, struct list_head *head,
 
 	mutex_lock(lock);
 	list_for_each_entry_safe(buf, next, head, list) {
-		if(!buf->dmabuf_handle){
-			buf_free_dma(dev, buf);
+			dma_free_coherent(dev, buf->size, buf->cpu_mem,buf->dma_handle);
 			list_del(&buf->list);
 			kfree(buf);
-		}
 	}
 	mutex_unlock(lock);
 }
