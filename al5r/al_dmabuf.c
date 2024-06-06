@@ -14,7 +14,7 @@
 #include <linux/module.h>
 #include <linux/slab.h>
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,16,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,15,0)
 MODULE_IMPORT_NS(DMA_BUF);
 #endif
 
@@ -194,6 +194,8 @@ static void al5_dmabuf_release(struct dma_buf *buf)
 	kfree(dinfo);
 }
 
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 8, 0)
 static void *al5_dmabuf_kmap(struct dma_buf *dmabuf, unsigned long page_num)
 {
 	struct al5_dmabuf_priv *dinfo = dmabuf->priv;
@@ -201,6 +203,7 @@ static void *al5_dmabuf_kmap(struct dma_buf *dmabuf, unsigned long page_num)
 
 	return vaddr + page_num * PAGE_SIZE;
 }
+#endif
 
 #if LINUX_VERSION_CODE > KERNEL_VERSION(5, 18, 0)
 static int al5_dmabuf_vmap(struct dma_buf *dbuf, struct iosys_map *map)
@@ -213,7 +216,19 @@ static void *al5_dmabuf_vmap(struct dma_buf *dbuf)
 	struct al5_dmabuf_priv *dinfo = dbuf->priv;
 	void *vaddr = dinfo->buffer->cpu_handle;
 
+#if LINUX_VERSION_CODE > KERNEL_VERSION(5, 10, 0)
+	if (!vaddr)
+		return -ENOMEM;
+#if LINUX_VERSION_CODE > KERNEL_VERSION(5, 18, 0)
+	iosys_map_set_vaddr(map, vaddr);
+#else
+	dma_buf_map_set_vaddr(map, vaddr);
+#endif
+
+	return 0;
+#else
 	return vaddr;
+#endif
 }
 
 static const struct dma_buf_ops al5_dmabuf_ops = {
