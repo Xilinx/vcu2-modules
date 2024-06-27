@@ -58,6 +58,8 @@
 #define AL_CODEC_DATA_OFFSET_MSB                        0x0458
 #define AL_CODEC_DATA_OFFSET_LSB                        0x045C
 
+#define AL_CODEC_MCU_BOOT_TIMEOUT_RATIO                 (15000000000)
+
 #define MACHINE_ID_1                                    1
 #define MACHINE_ID_2                                    2
 #define MACHINE_ID_2_IP_OFFSET                          0x06000000
@@ -93,6 +95,13 @@ struct boot_header {
 	uint64_t ip_end;
 	uint64_t mcu_clk_rate;
 } __attribute__((__packed__));
+
+
+/* Get the boot timeout using the clock rate (in msecs ) */
+static inline uint32_t estimate_boot_timeout(uint32_t clk_rate)
+{
+  return (uint32_t)( AL_CODEC_MCU_BOOT_TIMEOUT_RATIO / clk_rate );
+}
 
 static bool common_mem_check_machine_id_1(struct al_common_dev *dev,
 					  dma_addr_t dma_handle,
@@ -397,15 +406,17 @@ static uint64_t get_machine_boot_addr(struct al_common_dev *dev,
 static int common_start_fw(struct al_common_dev *dev, struct boot_header *bh)
 {
 	uint64_t boot_addr = get_machine_boot_addr(dev, bh);
+	uint32_t boot_timeout = estimate_boot_timeout(dev->mcu_clk_rate);
 
 	common_writel(dev, AL_CODEC_MCU_BOOT_ADDR_MSB, upper_32_bits(boot_addr));
 	common_writel(dev, AL_CODEC_MCU_BOOT_ADDR_LSB, lower_32_bits(boot_addr));
 	common_dbg(dev, "boot_addr = %pad\n", &boot_addr);
+	common_dbg(dev, "boot_timeout = %d\n",boot_timeout);
 
 	/* let's go */
 	common_writel(dev, AL_CODEC_MCU_CLK, AL_CODEC_MCU_CLK_ENABLE);
 
-	return !wait_for_completion_timeout(&dev->done, HZ);
+	return !wait_for_completion_timeout(&dev->done,msecs_to_jiffies(boot_timeout));
 }
 
 static uint64_t get_machine_offset(struct al_common_dev *dev,
