@@ -1,12 +1,13 @@
+/*
+* 
+* Copyright (C) 2019 Allegro DVT2.  All rights reserved.
+*/
+
 #include <linux/of.h>
 #include <linux/platform_device.h>
-
-
 #include <linux/module.h>
 
 #include "al_riscv_drv_common.h"
-
-
 
 static const al_riscv_device_data ald3xx_data = {
 	.fw_name		= "ald3xx.fw",
