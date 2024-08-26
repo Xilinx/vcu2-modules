@@ -499,13 +499,15 @@ static void common_fw_callback(const struct firmware *fw, void *context)
 
 	memcpy(&bh, fw->data + AL_BOOT_HEADER_OFFSET, sizeof(bh));
 	common_dbg(dev, "bh version 0x%08x\n", bh.bh_version);
-	common_info(dev, "fw version 0x%08x\n", bh.fw_version);
+	common_info(dev, "fw version %d.%d.%d\n", (u8)(bh.fw_version >> 20), 
+						 (u8)(bh.fw_version >> 12), (u8)bh.fw_version);
 	common_dbg(dev, "fw model = %s\n", bh.model);
 	common_dbg(dev, "vaddress start = 0x%016llx\n", bh.vaddr_start);
 	common_dbg(dev, "vaddress end   = 0x%016llx\n", bh.vaddr_end);
 	common_dbg(dev, "boot address   = 0x%016llx\n", bh.boot_addr);
 	common_info(dev, "machineid     = %lld\n", bh.machine_id);
 	dev->fw_size = bh.vaddr_end - bh.vaddr_start;
+	dev->fw_version = bh.fw_version;
 
 	common_dbg(dev, "check header\n");
 	if (bh.bh_version < AL_BOOT_VERSION(2, 0, 0) ||

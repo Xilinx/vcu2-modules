@@ -444,8 +444,6 @@ static int codec_ioctl_dma_alloc(struct codec_dev *dev, unsigned long arg,
 	return 0;
 }
 
-
-
 static int codec_ioctl_dma_alloc_w_fd(struct codec_dev *dev, unsigned long arg,
 				 struct codec_client *client)
 {
@@ -518,6 +516,21 @@ static int codec_ioctl_dma_free_mcu(struct codec_dev *dev, unsigned long arg)
 		return ret;
 
 	return al_common_dma_buf_free(&dev->common, info.phy_addr);
+}
+
+static int codec_ioctl_fw_info(struct codec_dev *dev, unsigned long arg)
+{
+	void __user *ubuf = (void __user *)arg;
+	struct codec_fw_info info;
+	int ret;
+
+	info.version = dev->common.fw_version;
+
+	ret = copy_to_user(ubuf, &info, sizeof(info));
+	if (ret)
+		return ret;
+
+	return 0;
 }
 
 static int codec_ioctl_get_event(struct codec_dev *dev,
@@ -640,16 +653,20 @@ static long codec_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 	case CODEC_DMA_GET_PHY:
 		ret = codec_ioctl_get_physical_address(dev, arg, client);
 		break;
+	case CODEC_GET_FW_INFO:
+		ret = codec_ioctl_fw_info(dev, arg);
+		break;
 	default:
 		codec_err(dev, "unknown ioctl %x\n", cmd);
 		codec_err(dev, "Existing ioctls:\n");
-		codec_err(dev, "CODEC_FW_CMD_REPLY		:%lx\n",	CODEC_FW_CMD_REPLY);
-		codec_err(dev, "CODEC_DMA_ALLOC			:%lx\n",	CODEC_DMA_ALLOC);
+		codec_err(dev, "CODEC_FW_CMD_REPLY			:%lx\n",	CODEC_FW_CMD_REPLY);
+		codec_err(dev, "CODEC_DMA_ALLOC					:%lx\n",	CODEC_DMA_ALLOC);
 		codec_err(dev, "CODEC_DMA_ALLOC_WITH_FD	:%lx\n",	CODEC_DMA_ALLOC_WITH_FD);
-		codec_err(dev, "CODEC_DMA_FREE			:%lx\n",	CODEC_DMA_FREE);
-		codec_err(dev, "CODEC_GET_EVENT			:%lx\n",	CODEC_GET_EVENT);
-		codec_err(dev, "CODEC_DMA_FREE_MCU 		:%lx\n",	CODEC_DMA_FREE_MCU);
-		codec_err(dev, "CODEC_DMA_GET_PHY 		:%lx\n",	CODEC_DMA_GET_PHY);
+		codec_err(dev, "CODEC_DMA_FREE					:%lx\n",	CODEC_DMA_FREE);
+		codec_err(dev, "CODEC_GET_EVENT					:%lx\n",	CODEC_GET_EVENT);
+		codec_err(dev, "CODEC_DMA_FREE_MCU 			:%lx\n",	CODEC_DMA_FREE_MCU);
+		codec_err(dev, "CODEC_DMA_GET_PHY 			:%lx\n",	CODEC_DMA_GET_PHY);
+		codec_err(dev, "CODEC_GET_FW_INFO 			:%lx\n",	CODEC_GET_FW_INFO);
 		ret = -EINVAL;
 	}
 

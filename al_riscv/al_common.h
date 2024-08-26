@@ -24,6 +24,7 @@ struct al_common_dev {
 	void *fw_cpu_mem;
 	dma_addr_t fw_phys_addr;
 	size_t fw_size;
+	uint32_t fw_version;
 	unsigned long mcu_clk_rate;
 
 	struct codec_mb mb_h2m;

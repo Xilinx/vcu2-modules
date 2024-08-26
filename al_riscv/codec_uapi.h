@@ -26,14 +26,17 @@ struct codec_event {
 	void *event;
 };
 
+struct codec_fw_info {
+	uint32_t version;
+};
+
 #define CODEC_FW_CMD_REPLY      _IOWR('c', 1, struct codec_cmd_reply)
-
 #define CODEC_DMA_ALLOC         _IOWR('c', 2, struct codec_dma_info)
-#define CODEC_DMA_ALLOC_WITH_FD _IOWR('c', 6, struct codec_dma_info)
-
 #define CODEC_DMA_FREE          _IOWR('c', 3, struct codec_dma_info)
 #define CODEC_GET_EVENT         _IOWR('c', 4, struct codec_event)
 #define CODEC_DMA_FREE_MCU      _IOWR('c', 5, struct codec_dma_info)
+#define CODEC_DMA_ALLOC_WITH_FD _IOWR('c', 6, struct codec_dma_info)
 #define CODEC_DMA_GET_PHY       _IOWR('c', 7, struct codec_dma_info)
+#define CODEC_GET_FW_INFO       _IOR('c', 8, struct codec_fw_info)
 
 #endif
