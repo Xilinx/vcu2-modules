@@ -407,7 +407,6 @@ static int common_start_fw(struct al_common_dev *dev, struct boot_header *bh)
 {
 	uint64_t boot_addr = get_machine_boot_addr(dev, bh);
 	uint32_t boot_timeout = estimate_boot_timeout(dev->mcu_clk_rate);
-
 	common_writel(dev, AL_CODEC_MCU_BOOT_ADDR_MSB, upper_32_bits(boot_addr));
 	common_writel(dev, AL_CODEC_MCU_BOOT_ADDR_LSB, lower_32_bits(boot_addr));
 	common_dbg(dev, "boot_addr = %pad\n", &boot_addr);
@@ -416,6 +415,7 @@ static int common_start_fw(struct al_common_dev *dev, struct boot_header *bh)
 	/* let's go */
 	common_writel(dev, AL_CODEC_MCU_CLK, AL_CODEC_MCU_CLK_ENABLE);
 
+	boot_timeout = max(boot_timeout, 1000);
 	return !wait_for_completion_timeout(&dev->done,msecs_to_jiffies(boot_timeout));
 }
 
@@ -499,7 +499,7 @@ static void common_fw_callback(const struct firmware *fw, void *context)
 
 	memcpy(&bh, fw->data + AL_BOOT_HEADER_OFFSET, sizeof(bh));
 	common_dbg(dev, "bh version 0x%08x\n", bh.bh_version);
-	common_info(dev, "fw version %d.%d.%d\n", (u8)(bh.fw_version >> 20), 
+	common_info(dev, "fw version %d.%d.%d\n", (u8)(bh.fw_version >> 20),
 						 (u8)(bh.fw_version >> 12), (u8)bh.fw_version);
 	common_dbg(dev, "fw model = %s\n", bh.model);
 	common_dbg(dev, "vaddress start = 0x%016llx\n", bh.vaddr_start);
