@@ -2,14 +2,10 @@
 
 ## Summary
 
-This repository contains the source code of al_codec and al5r drivers.
+This repository contains the source code of ale2_riscv(encoder), ald3_riscv(decoder) drivers.
 
-The al_codec driver is used by the soft codec repository and other control
+The alXX_riscv drivers are used by the soft codec repository and other control
 software to access services provided by riscv firmware located inside hw ip.
-
-The al5r driver is used by the soft_codec repository and other control software
-to access an hw ip with direct registers access. It implements a read / write
-registers interface and make it possible to handle interrupts in userspace.
 
 ## Building
 
@@ -22,37 +18,23 @@ variable.
 $ ARCH=arm CROSS_COMPILE=arm-linux-gnueabihf- KDIR=linux-headers-dir make
 ```
 
-Compiled kernel modules are located in al_riscv/al_codec.ko and al5r/al5r.ko
+Compiled kernel modules are located in al_riscv/ale2_riscv.ko and al_riscv/ald3_riscv.ko .
 
 ## Using on a board with riscv fw
 
-Copy decoder or/and encoder fw with correct name in board /lib/firmware directory.
-Copy al_codec.ko on your board and insert it.
+Copy decoder and/or encoder fw with correct name in board /lib/firmware directory.
+Copy ale2_riscv.ko and/or ald3_riscv.ko to your board and insert it.
 Decoder firmware must be located in /lib/firmware/ald3xx.fw file.
 Encoder firmware must be located in /lib/firmware/ale2xx.fw file.
 
 ```
-$ insmod al_codec.ko
+$ insmod ale2_riscv.ko
+$ insmod ald3_riscv.ko
 ```
 
-## Device Tree Bindings for al_codec
+## Device Tree Bindings for ald3_riscv and ale2_riscv
 
 You can change configure some of the behavior of driver using device tree
 bindings.
-See the device-tree-bindings-al_codec.txt file for more information about available
-bindings.
-
-## Using on a board without riscv fw
-
-Copy al5r.ko on your board and insert it.
-
-```
-$ insmod al5r.ko
-```
-
-## Device Tree Bindings for al5r
-
-You can change configure some of the behavior of driver using device tree
-bindings.
-See the device-tree-bindings-al5r.txt file for more information about available
+See the device-tree-bindings-alXX_riscv.txt file for more information about available
 bindings.

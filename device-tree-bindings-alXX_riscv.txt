@@ -1,4 +1,4 @@
-Allegro al_codec video codec driver
+Allegro alXX_riscv video codec driver
 
 Required Properties:
 - compatible: "al,ale2xx" or "al,ald3xx" respectively for encoder and decoder
@@ -41,4 +41,3 @@ ale2xx@0x83c00000 {
 	interrupts = <0x0 0x1d 0x4>;
 	al,devicename="al_e2xx";
 };
-

@@ -1,3 +1,0 @@
-obj-m += al5r.o
-
-al5r-y :=  al_main.o al_ip.o al_alloc.o al_alloc_ioctl.o al_dma_common.o al_dmabuf.o
