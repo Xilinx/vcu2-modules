@@ -419,10 +419,6 @@ static int common_start_fw(struct al_common_dev *dev, struct boot_header *bh)
 {
 	uint64_t boot_addr = get_machine_boot_addr(dev, bh);
 	uint32_t boot_timeout = estimate_boot_timeout(dev->mcu_clk_rate);
-<<<<<<< HEAD
-
-=======
->>>>>>> 43939590bc2392e3ff9891fce279f8ba1b9ef217
 	common_writel(dev, AL_CODEC_MCU_BOOT_ADDR_MSB, upper_32_bits(boot_addr));
 	common_writel(dev, AL_CODEC_MCU_BOOT_ADDR_LSB, lower_32_bits(boot_addr));
 	common_dbg(dev, "boot_addr = %pad\n", &boot_addr);
@@ -431,10 +427,7 @@ static int common_start_fw(struct al_common_dev *dev, struct boot_header *bh)
 	/* let's go */
 	common_writel(dev, AL_CODEC_MCU_CLK, AL_CODEC_MCU_CLK_ENABLE);
 
-<<<<<<< HEAD
-=======
 	boot_timeout = max(boot_timeout, 1000);
->>>>>>> 43939590bc2392e3ff9891fce279f8ba1b9ef217
 	return !wait_for_completion_timeout(&dev->done,msecs_to_jiffies(boot_timeout));
 }
 
