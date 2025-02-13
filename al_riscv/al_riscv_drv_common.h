@@ -19,6 +19,7 @@
 
 #include <linux/dma-mapping.h>
 #include <linux/platform_device.h>
+#include <linux/version.h>
 
 #include "al_buf.h"
 
@@ -54,6 +55,10 @@ struct codec_dma_buf *client_dma_buf_lookup(struct codec_client *client,
 void client_dma_buf_remove(struct codec_client *client, struct codec_dma_buf *buf);
 
 int al_riscv_codec_probe(struct platform_device *pdev);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 11, 0)
+void al_riscv_codec_remove(struct platform_device *pdev);
+#else
 int al_riscv_codec_remove(struct platform_device *pdev);
+#endif
 
 #endif

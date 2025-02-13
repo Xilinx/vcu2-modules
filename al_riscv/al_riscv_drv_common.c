@@ -884,7 +884,11 @@ int al_riscv_codec_probe(struct platform_device *pdev)
 	return 0;
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 11, 0)
+void al_riscv_codec_remove(struct platform_device *pdev)
+#else
 int al_riscv_codec_remove(struct platform_device *pdev)
+#endif
 {
 	struct codec_dev *dev = platform_get_drvdata(pdev);
 
@@ -892,5 +896,9 @@ int al_riscv_codec_remove(struct platform_device *pdev)
 	if (dev->is_misc_init_done)
 		misc_deregister(&dev->misc);
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 11, 0)
+	al_common_remove(&dev->common);
+#else
 	return al_common_remove(&dev->common);
+#endif
 }
