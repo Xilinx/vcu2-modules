@@ -139,17 +139,19 @@ static bool common_mem_check_machine_id_2(struct al_common_dev *dev,
 }
 
 static void *common_dma_alloc_coherent(struct al_common_dev *dev, size_t size,
-				       dma_addr_t *dma_handle, gfp_t gfp)
+		       dma_addr_t *dma_handle, gfp_t flag)
 {
 	void *cpu_mem;
 
 	BUG_ON(!dev->mem_check);
-	cpu_mem = dma_alloc_coherent(&dev->pdev->dev, size, dma_handle, gfp);
+	cpu_mem = dma_alloc_coherent(&dev->pdev->dev, size, dma_handle, flag);
+
 	if (!cpu_mem || dev->mem_check(dev, *dma_handle, size))
 		return cpu_mem;
 
 	common_dbg(dev, "mem check failed for %pad of size %zu\n", dma_handle,
 		   size);
+
 	dma_free_coherent(&dev->pdev->dev, size, cpu_mem, *dma_handle);
 
 	return NULL;
@@ -259,7 +261,7 @@ static void handle_get_cma_req(struct al_common_dev *dev,
 	buf->size = req.uSize;
 	/* We don't need kernel side mapping */
 	buf->is_kernel_mapped = dev->map_in_kernel;
-	buf->cpu_mem = common_dma_alloc(dev, req.uSize, &buf->dma_handle,
+	buf->cpu_mem = common_dma_alloc_coherent(dev, req.uSize, &buf->dma_handle,
 					GFP_KERNEL);
 	if (!buf->cpu_mem)
 		goto send_reply;
@@ -725,24 +727,7 @@ int al_common_send(struct al_common_dev *dev, struct msg_itf_header *hdr)
 void *common_dma_alloc(struct al_common_dev *dev, size_t size,
 		       dma_addr_t *dma_handle, gfp_t flag)
 {
-	void *cpu_mem;
-	unsigned long attrs = DMA_ATTR_FORCE_CONTIGUOUS;
-
-	/* Map in kernel */
-	attrs |= (dev->map_in_kernel) ? 0 : DMA_ATTR_NO_KERNEL_MAPPING;
-
-	BUG_ON(!dev->mem_check);
-	cpu_mem = dma_alloc_attrs(&dev->pdev->dev, size, dma_handle, flag, attrs);
-
-	if (!cpu_mem || dev->mem_check(dev, *dma_handle, size))
-		return cpu_mem;
-
-	common_dbg(dev, "mem check failed for %pad of size %zu\n", dma_handle,
-		   size);
-
-	dma_free_attrs(&dev->pdev->dev, size, cpu_mem, *dma_handle, attrs);
-
-	return NULL;
+	return common_dma_alloc_coherent(dev, size, dma_handle, flag);
 }
 
 int al_common_dma_buf_free(struct al_common_dev *dev, uint64_t phy_addr)
@@ -755,7 +740,6 @@ int al_common_dma_buf_free(struct al_common_dev *dev, uint64_t phy_addr)
 
 	dma_free_coherent(&dev->pdev->dev, buf->size, buf->cpu_mem,
 			  buf->dma_handle);
-
 
 	return 0;
 }
