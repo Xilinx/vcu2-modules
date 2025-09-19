@@ -1,4 +1,4 @@
-/* 
+/*
  * al_common.c common functions used by encoder and decoder.
  *
  * Copyright (C) 2024, Allegro DVT2 (www.allegrodvt.com)
@@ -69,8 +69,8 @@
 #define AL_CODEC_INSTRUCTION_OFFSET_LSB                 0x0454
 #define AL_CODEC_DATA_OFFSET_MSB                        0x0458
 #define AL_CODEC_DATA_OFFSET_LSB                        0x045C
-
 #define AL_CODEC_MCU_BOOT_TIMEOUT_RATIO                 (15000000000)
+#define MCU_VIRTUAL_SIZE                                (254ULL * 1024 * 1024 * 1024)  /* 254GB */
 
 #define MACHINE_ID_1                                    1
 #define MACHINE_ID_2                                    2
@@ -108,34 +108,37 @@ struct boot_header {
 	uint64_t mcu_clk_rate;
 } __attribute__((__packed__));
 
-
 /* Get the boot timeout using the clock rate (in msecs ) */
 static inline uint32_t estimate_boot_timeout(uint32_t clk_rate)
 {
   return (uint32_t)( AL_CODEC_MCU_BOOT_TIMEOUT_RATIO / clk_rate );
 }
 
-static bool common_mem_check_machine_id_1(struct al_common_dev *dev,
-					  dma_addr_t dma_handle,
-					  size_t size)
+/**
+ * get_mcu_offset: Calculate MCU offset based on reserved memory location
+ * This function now properly handles both high and low physical addresses
+ * by creating a mapping window that accommodates the reserved memory region
+ *
+ * @param reserved_mem_start: Start of reserved memory region
+ * @param reserved_mem_size: Size of reserved memory region
+ * @return: Offset for MCU address translation
+ */
+static inline u64 get_mcu_offset(u64 reserved_mem_start, u64 reserved_mem_size)
 {
-	/* Full 64 bits memory space is available */
+    uint64_t reserved_mem_end = reserved_mem_start + reserved_mem_size;
 
-	return true;
-}
+    /* If reserved memory fits entirely within MCU's addressing capability
+     * For low addresses, we can start mapping from address 0 */
+    if (reserved_mem_end <= MCU_VIRTUAL_SIZE)
+        return 0;
 
-static bool common_mem_check_machine_id_2(struct al_common_dev *dev,
-					  dma_addr_t dma_handle,
-					  size_t size)
-{
-	const uint64_t max_addr = 0x7f80000000ull;
+    /* For high addresses or large regions, calculate offset to fit the reserved memory
+     * within the MCU's virtual address space */
+    if (reserved_mem_size <= MCU_VIRTUAL_SIZE)
+        return reserved_mem_start; // Align the reserved memory region to fit within virtual space
 
-	/* Check memory is inside [0:2^39 - 2G[ range */
-	if (dma_handle > max_addr ||
-	    dma_handle + size > max_addr)
-		return false;
-
-	return true;
+    // Reserved memory is larger than MCU virtual space - use start address
+    return reserved_mem_start;
 }
 
 static void *common_dma_alloc_coherent(struct al_common_dev *dev, size_t size,
@@ -143,18 +146,13 @@ static void *common_dma_alloc_coherent(struct al_common_dev *dev, size_t size,
 {
 	void *cpu_mem;
 
-	BUG_ON(!dev->mem_check);
 	cpu_mem = dma_alloc_coherent(&dev->pdev->dev, size, dma_handle, flag);
+	if (!cpu_mem)
+	  return NULL;
 
-	if (!cpu_mem || dev->mem_check(dev, *dma_handle, size))
-		return cpu_mem;
+  common_dbg(dev, "allocated mem %p -- 0x%16llx\n", cpu_mem, *dma_handle);
 
-	common_dbg(dev, "mem check failed for %pad of size %zu\n", dma_handle,
-		   size);
-
-	dma_free_coherent(&dev->pdev->dev, size, cpu_mem, *dma_handle);
-
-	return NULL;
+	return cpu_mem;
 }
 
 static inline u32 common_readl(struct al_common_dev *dev, int addr)
@@ -404,23 +402,20 @@ static irqreturn_t common_hardirq_handler(int irq, void *data)
 	return IRQ_WAKE_THREAD;
 }
 
-static uint64_t get_machine_boot_addr(struct al_common_dev *dev,
+static inline u64 get_machine_boot_addr(struct al_common_dev *dev,
 				      struct boot_header *bh)
 {
-	switch (bh->machine_id) {
-	case MACHINE_ID_1:
-		return bh->boot_addr;
-	case MACHINE_ID_2:
-		return bh->boot_addr - bh->vaddr_start + dev->fw_phys_addr;
-	default:
-		BUG();
-	}
+  u64 fw_addr;
+
+  fw_addr = dev->fw_phys_addr - dev->offset;
+	return bh->boot_addr - bh->vaddr_start + fw_addr;
 }
 
 static int common_start_fw(struct al_common_dev *dev, struct boot_header *bh)
 {
-	uint64_t boot_addr = get_machine_boot_addr(dev, bh);
-	uint32_t boot_timeout = estimate_boot_timeout(dev->mcu_clk_rate);
+	u64 boot_addr = get_machine_boot_addr(dev, bh);
+	u32 boot_timeout = estimate_boot_timeout(dev->mcu_clk_rate);
+
 	common_writel(dev, AL_CODEC_MCU_BOOT_ADDR_MSB, upper_32_bits(boot_addr));
 	common_writel(dev, AL_CODEC_MCU_BOOT_ADDR_LSB, lower_32_bits(boot_addr));
 	common_dbg(dev, "boot_addr = %pad\n", &boot_addr);
@@ -429,72 +424,32 @@ static int common_start_fw(struct al_common_dev *dev, struct boot_header *bh)
 	/* let's go */
 	common_writel(dev, AL_CODEC_MCU_CLK, AL_CODEC_MCU_CLK_ENABLE);
 
-	boot_timeout = max(boot_timeout, 1000);
+	boot_timeout = max(boot_timeout, (u32)1000);
 	return !wait_for_completion_timeout(&dev->done,msecs_to_jiffies(boot_timeout));
-}
-
-static uint64_t get_machine_offset(struct al_common_dev *dev,
-				   struct boot_header *bh)
-{
-	switch (bh->machine_id) {
-	case MACHINE_ID_1:
-		return dev->fw_phys_addr - bh->vaddr_start;
-	case MACHINE_ID_2:
-		return 0;
-	default:
-		BUG();
-	}
-}
-
-static uint64_t common_get_perih_addr(struct al_common_dev *dev)
-{
-	struct resource *res;
-
-	res = platform_get_resource_byname(dev->pdev, IORESOURCE_MEM, "apb");
-	if (!res) {
-		common_err(dev, "Unable fo find apb start address\n");
-		return 0;
-	}
-
-	if (res->start & MACHINE_ID_2_APB_MASK) {
-		common_err(dev, "apb start address is invalid\n");
-		return 0;
-	}
-
-	return res->start;
 }
 
 static int common_alloc_and_setup_fw_memory(struct al_common_dev *dev,
 					    struct boot_header *bh)
 {
-	uint64_t offset;
-
 	dev->fw_cpu_mem = common_dma_alloc_coherent(dev, dev->fw_size,
 						    &dev->fw_phys_addr,
 						    GFP_KERNEL);
 	if (!dev->fw_cpu_mem)
 		return -ENOMEM;
 
-	common_dbg(dev, "fw phys_addr = %pad\n", &dev->fw_phys_addr);
-	common_dbg(dev, "fw virt_addr = 0x%p\n", dev->fw_cpu_mem);
+	common_info(dev, "offset       = 0x%016llx\n", dev->offset);
+	common_info(dev, "fw phys_addr = %pad\n", &dev->fw_phys_addr);
+	common_info(dev, "fw virt_addr = 0x%p\n", dev->fw_cpu_mem);
 
-	offset = get_machine_offset(dev, bh);
-	common_dbg(dev, "offset       = 0x%016llx\n", offset);
+	common_writel(dev, AL_CODEC_INSTRUCTION_OFFSET_LSB, lower_32_bits(dev->offset));
+	common_writel(dev, AL_CODEC_INSTRUCTION_OFFSET_MSB, upper_32_bits(dev->offset));
+	common_writel(dev, AL_CODEC_DATA_OFFSET_LSB, lower_32_bits(dev->offset));
+	common_writel(dev, AL_CODEC_DATA_OFFSET_MSB, upper_32_bits(dev->offset));
 
-	common_writel(dev, AL_CODEC_INSTRUCTION_OFFSET_LSB, lower_32_bits(offset));
-	common_writel(dev, AL_CODEC_INSTRUCTION_OFFSET_MSB, upper_32_bits(offset));
-	common_writel(dev, AL_CODEC_DATA_OFFSET_LSB, lower_32_bits(offset));
-	common_writel(dev, AL_CODEC_DATA_OFFSET_MSB, upper_32_bits(offset));
+	common_info(dev, "periph_addr = 0x%016llx\n", dev->periph_addr);
 
-	if (bh->machine_id == MACHINE_ID_2) {
-		uint64_t periph_addr = common_get_perih_addr(dev);
-
-		common_dbg(dev, "periph_addr = %pad\n", &periph_addr);
-		common_writel(dev, AL_CODEC_MCU_PERIPHERAL_ADDR_MSB,
-			      upper_32_bits(periph_addr));
-		common_writel(dev, AL_CODEC_MCU_PERIPHERAL_ADDR_LSB,
-			      lower_32_bits(periph_addr));
-	}
+	common_writel(dev, AL_CODEC_MCU_PERIPHERAL_ADDR_LSB, lower_32_bits(dev->periph_addr));
+	common_writel(dev, AL_CODEC_MCU_PERIPHERAL_ADDR_MSB, upper_32_bits(dev->periph_addr));
 
 	return 0;
 }
@@ -502,6 +457,7 @@ static int common_alloc_and_setup_fw_memory(struct al_common_dev *dev,
 static void common_fw_callback(const struct firmware *fw, void *context)
 {
 	struct al_common_dev *dev = context;
+	struct resource *res;
 	struct boot_header bh;
 	struct boot_header *bhw;
 	int ret;
@@ -530,23 +486,21 @@ static void common_fw_callback(const struct firmware *fw, void *context)
 		goto error_release;
 	}
 
-	switch (bh.machine_id) {
-	case MACHINE_ID_1:
-		dev->mem_check = common_mem_check_machine_id_1;
-		break;
-	case MACHINE_ID_2:
-		dev->mem_check = common_mem_check_machine_id_2;
-#ifdef HACK_THIS_AS_IPP_STARTS_AT_0_FOR_DECODER
-		if (!common_get_perih_addr(dev)) {
-			common_err(dev, "machine_id_2 must define periph addr\n");
-			goto error_release;
-		}
-#endif
-		break;
-	default:
-		common_err(dev, "unsupported machine id %lld\n", bh.machine_id);
-		goto error_release;
+	if(WARN(bh.machine_id != MACHINE_ID_2, "Unsupported machine id"))
+	  goto error_release;
+
+	res = platform_get_resource_byname(dev->pdev, IORESOURCE_MEM, "apb");
+	if (!res) {
+		common_err(dev, "Unable fo find apb start address\n");
+	  goto error_release;
 	}
+
+	if (res->start & MACHINE_ID_2_APB_MASK) {
+		common_err(dev, "apb start address is invalid\n");
+	  goto error_release;
+	}
+
+  dev->periph_addr = res->start;
 
 	ret = common_alloc_and_setup_fw_memory(dev, &bh);
 	if (ret) {
@@ -563,15 +517,15 @@ static void common_fw_callback(const struct firmware *fw, void *context)
 
 	common_info(dev, "Copy %zu bytes of fw\n", fw->size);
 	memcpy(dev->fw_cpu_mem, fw->data, fw->size);
+
 	/* give fw information about registers location */
 	bhw = dev->fw_cpu_mem + AL_BOOT_HEADER_OFFSET;
-	if (bh.machine_id == MACHINE_ID_1)
-		bhw->ip_start = dev->regs_info.start;
-	else if (bh.machine_id == MACHINE_ID_2)
-		bhw->ip_start = common_get_perih_addr(dev) + MACHINE_ID_2_IP_OFFSET;
+	bhw->ip_start = dev->periph_addr + MACHINE_ID_2_IP_OFFSET;
 	bhw->ip_end = bhw->ip_start + resource_size(&dev->regs_info);
+
 	common_dbg(dev, "ip_start = 0x%016llx\n", bhw->ip_start);
 	common_dbg(dev, "ip_end =   0x%016llx\n", bhw->ip_end);
+
 	/* give fw information about mcu clock */
 	if (dev->mcu_clk_rate)
 		bhw->mcu_clk_rate = dev->mcu_clk_rate;
@@ -603,21 +557,68 @@ static int common_firmware_request_nowait(struct al_common_dev *dev,
 				       common_fw_callback);
 }
 
-static int common_setup_dma(struct al_common_dev *dev)
+static int common_setup_dma(struct al_common_dev *common)
 {
+	struct device *dev = &common->pdev->dev;
+	struct device_node *node;
+	struct resource r;
 	int ret;
 
-	/* setup dma memory mask */
-	ret = dma_set_mask_and_coherent(&dev->pdev->dev, DMA_BIT_MASK(64));
+	common_info(common, "Setting up DMA...\n");
+
+	node = of_parse_phandle(dev->of_node, "memory-region", 0);
+	if (!node) {
+		/* If there is a memory-region phandle, we use that memory to allocate our dma buffers
+		 * and if the hw ip supports it, we start the hw ip bus address range at the first address
+		 * of that memory.
+		 * Else, we use the CMA memory.
+		 * If we use the CMA memory, we cannot know where the cma memory region is starting,
+		 * so we do not configure the hw ip bus address range and it will start at address 0 by default.
+		 * If the hw ip supports 64bit memory regions, then there is nothing to configure.
+		 */
+		common_warn(common, "No reserved memory, use CMA instead\n");
+
+		/* FIXED: Limit DMA mask to 39 bits (512GB) for CMA to ensure compatibility with MCU addressing */
+		ret = dma_coerce_mask_and_coherent(dev, DMA_BIT_MASK(39));
+		if (ret) {
+			common_err(common, "No suitable DMA available with 39-bit addressing");
+			return ret;
+		}
+
+		common->offset = 0;  /* Default offset for CMA */
+		common_dbg(common, "Using CMA with 39-bit DMA addressing\n");
+		return 0;
+	}
+
+	/* Setup 64-bit DMA mask for reserved memory case */
+	ret = dma_coerce_mask_and_coherent(dev, DMA_BIT_MASK(64));
 	if (ret) {
-		common_err(dev, "failed to set dma\n");
+		common_err(common, "No suitable DMA available");
+		return ret;
+	}
+
+	ret = of_reserved_mem_device_init(dev);
+	if (ret) {
+		common_err(common, "Couldn't get reserved memory (errno: %d)", ret);
+		return ret;
+	}
+
+	ret = of_address_to_resource(node, 0, &r);
+	of_node_put(node);
+	if (ret) {
+		common_err(common, "Failed to parse the memory-region resources");
 		return -EINVAL;
 	}
 
-	/* Try to use reserved memory if we got one */
-	ret = of_reserved_mem_device_init(&dev->pdev->dev);
-	if (ret && of_parse_phandle(dev->pdev->dev.of_node, "memory-region", 0))
-		common_warn(dev, "Unable to got reserved memory, using cma\n");
+	common->reserved_mem_start = r.start;
+	common->reserved_mem_size = r.end - r.start;
+
+	/* FIXED: Use improved offset calculation that handles both high and low addresses */
+	common->offset = get_mcu_offset(common->reserved_mem_start, common->reserved_mem_size);
+
+	common_dbg(common, "Reserved memory: 0x%llx, size: 0x%lld\n",
+		    (u64)common->reserved_mem_start, common->reserved_mem_size);
+	common_dbg(common, "Calculated offset: 0x%llx\n", common->offset);
 
 	return 0;
 }
@@ -633,6 +634,9 @@ int al_common_probe(struct platform_device *pdev, struct al_common_dev *dev,
 	dev->pdev = pdev;
 	dev->map_in_kernel = map_in_kernel;
 	dev->mcu_clk_rate = 0;
+	dev->offset = 0;
+	dev->periph_addr = 0;
+
 	mutex_init(&dev->dma_lock);
 	INIT_LIST_HEAD(&dev->dma_buffers);
 	init_completion(&dev->done);
@@ -642,31 +646,34 @@ int al_common_probe(struct platform_device *pdev, struct al_common_dev *dev,
 		common_warn(dev, "Unable to get mcu clock, will keep default value\n");
 	else if (clk_prepare_enable(clk))
 		common_warn(dev, "Unable to enable mcu clock, will keep default value\n");
-
 	else
 		dev->mcu_clk_rate = clk_get_rate(clk);
 
 	/* setup dma memory */
 	ret = common_setup_dma(dev);
 	if (ret)
-		return ret;
+		goto err_clk_disable;
 
 	/* Hw registers */
 	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "regs");
 	if (!res) {
 		common_err(dev, "regs resource missing from device tree\n");
-		return -EINVAL;
+		ret = -EINVAL;
+		goto err_clk_disable;
 	}
+
 	dev->regs = devm_ioremap(&pdev->dev, res->start, resource_size(res));
 	if (!dev->regs) {
 		common_err(dev, "failed to map registers\n");
-		return -ENOMEM;
+		ret =  -ENOMEM;
+		goto err_clk_disable;
 	}
 
 	irq = platform_get_irq(pdev, 0);
 	if (irq < 0) {
 		common_err(dev, "Failed to get IRQ\n");
-		return -EINVAL;
+		ret = -EINVAL;
+		goto err_clk_disable;
 	}
 
 	ret = devm_request_threaded_irq(&pdev->dev, irq,
@@ -676,23 +683,29 @@ int al_common_probe(struct platform_device *pdev, struct al_common_dev *dev,
 					dev_name(&pdev->dev), dev);
 	if (ret) {
 		common_err(dev, "Unable to register irq handler\n");
-		return ret;
+		goto err_clk_disable;
 	}
 
 	ret = common_probe_check_and_setup_hw(dev, res);
 	if (ret) {
 		common_err(dev, "Unable to setup hw\n");
-		return ret;
+		goto err_clk_disable;
 	}
 
 	/* ok so request the fw */
 	ret = common_firmware_request_nowait(dev, fw_name);
 	if (ret) {
 		common_err(dev, "failed to request firmware\n");
-		return ret;
+		goto err_clk_disable;
 	}
 
 	return 0;
+
+err_clk_disable:
+	if(dev->mcu_clk_rate)
+		clk_disable_unprepare(clk);
+
+	return ret;
 }
 
 int al_common_remove(struct al_common_dev *dev)

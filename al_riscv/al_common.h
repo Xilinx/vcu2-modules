@@ -36,7 +36,7 @@ struct al_common_dev {
 	void *fw_cpu_mem;
 	dma_addr_t fw_phys_addr;
 	size_t fw_size;
-	uint32_t fw_version;
+	u32 fw_version;
 	unsigned long mcu_clk_rate;
 
 	struct codec_mb mb_h2m;
@@ -46,13 +46,15 @@ struct al_common_dev {
 	bool map_in_kernel;
 	struct mutex dma_lock;
 	struct list_head dma_buffers;
-
-	bool (*mem_check)(struct al_common_dev *, dma_addr_t, size_t);
-
 	/* callbacks set by client before common_probe */
 	void *cb_arg;
 	void (*process_msg_cb)(void *cb_arg, struct msg_itf_header *hdr);
 	void (*fw_ready_cb)(void *cb_arg);
+
+	u64 offset;
+	u64 periph_addr;
+	u64 reserved_mem_start;
+  u64 reserved_mem_size;
 };
 
 int al_common_probe(struct platform_device *pdev, struct al_common_dev *dev,
