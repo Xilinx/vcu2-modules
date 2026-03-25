@@ -1,38 +1,28 @@
-/*
- * Copyright (C) 2024, Allegro DVT2 (www.allegrodvt.com)
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License version 2 as published by
- * the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along with
- * this program.  If not, see <http://www.gnu.org/licenses/>.
- */
+/******************************************************************************
+*
+* Copyright (C) 2019 Allegro DVT2.  All rights reserved.
+*
+******************************************************************************/
 
 #ifndef __MSG_COMMON_ITF__
 #define __MSG_COMMON_ITF__ 1
 
-#define DECLARE_FULL_REQ(s) \
-	struct s ## _full { \
+#define DECLARE_FULL_REQ(s)                \
+	struct s##_full {                  \
 		struct msg_itf_header hdr; \
-		struct s req; \
+		struct s req;              \
 	}
 
-#define DECLARE_FULL_REPLY(s) \
-	struct s ## _full { \
+#define DECLARE_FULL_REPLY(s)              \
+	struct s##_full {                  \
 		struct msg_itf_header hdr; \
-		struct s reply; \
+		struct s reply;            \
 	}
 
-#define DECLARE_FULL_EVENT(s) \
-	struct s ## _full { \
+#define DECLARE_FULL_EVENT(s)              \
+	struct s##_full {                  \
 		struct msg_itf_header hdr; \
-		struct s event; \
+		struct s event;            \
 	}
 
 enum {
@@ -61,11 +51,14 @@ enum {
  * those struct byte per byte.
  */
 struct msg_itf_header {
-	uint64_t drv_client_hdl;
-	uint64_t drv_cmd_hdl;
+	uint64_t driver_client_handle;
+	uint64_t driver_command_handle;
 	uint16_t type;
 	uint16_t payload_len;
-	uint16_t padding[2];
+	/* Add padding to align the struct size
+	 * with the dcache line size
+	 */
+	uint16_t padding[22];
 };
 
 struct msg_itf_get_cma_req {

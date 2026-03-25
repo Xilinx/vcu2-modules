@@ -1,18 +1,8 @@
-/*
- * Copyright (C) 2024, Allegro DVT2 (www.allegrodvt.com)
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License version 2 as published by
- * the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along with
- * this program.  If not, see <http://www.gnu.org/licenses/>.
- */
+/******************************************************************************
+*
+* Copyright (C) 2019 Allegro DVT2.  All rights reserved.
+*
+******************************************************************************/
 
 #include <linux/delay.h>
 #include <linux/dma-buf.h>
@@ -21,7 +11,7 @@
 #include <linux/interrupt.h>
 #include <linux/io.h>
 #include <linux/miscdevice.h>
-
+#include <linux/module.h>
 #include <linux/of.h>
 #include <linux/of_address.h>
 #include <linux/of_device.h>
@@ -30,30 +20,31 @@
 #include <linux/uaccess.h>
 #include <linux/version.h>
 
-
 #include "al_buf.h"
 #include "al_codec_mb.h"
 #include "al_codec_msg.h"
 #include "al_common.h"
 #include "al_dmabuf.h"
-
-#include "al_riscv_drv_common.h"
+#include "al_riscv_drv.h"
 
 #include "msg_common_itf.h"
 #include "codec_uapi.h"
 
-#define MAX_MISC_NAME                                   32
+#define MAX_MISC_NAME 32
 
 #define codec_dbg(dev, fmt, ...) \
-	dev_dbg(&dev->common.pdev->dev, fmt, ## __VA_ARGS__)
+	dev_dbg(&dev->common.pdev->dev, fmt, ##__VA_ARGS__)
 #define codec_info(dev, fmt, ...) \
-	dev_info(&dev->common.pdev->dev, fmt, ## __VA_ARGS__)
+	dev_info(&dev->common.pdev->dev, fmt, ##__VA_ARGS__)
 #define codec_warn(dev, fmt, ...) \
-	dev_warn(&dev->common.pdev->dev, fmt, ## __VA_ARGS__)
+	dev_warn(&dev->common.pdev->dev, fmt, ##__VA_ARGS__)
 #define codec_err(dev, fmt, ...) \
-	dev_err(&dev->common.pdev->dev, fmt, ## __VA_ARGS__)
+	dev_err(&dev->common.pdev->dev, fmt, ##__VA_ARGS__)
 
-
+struct device_data {
+	const char *fw_name;
+	const char *default_device_name;
+};
 
 struct codec_cmd {
 	struct kref refcount;
@@ -115,19 +106,20 @@ static inline int is_type_event(uint16_t type)
 }
 
 void client_dma_buf_insert(struct codec_client *client,
-				  struct codec_dma_buf *buf)
+			   struct codec_dma_buf *buf)
 {
 	buf_insert(&client->dma_lock, &client->dma_buffers, buf);
 }
 
 struct codec_dma_buf *client_dma_buf_lookup(struct codec_client *client,
-						   dma_addr_t dma_handle, bool remove)
+					    dma_addr_t dma_handle, bool remove)
 {
-	return buf_lookup(&client->dma_lock, &client->dma_buffers, dma_handle, remove);
+	return buf_lookup(&client->dma_lock, &client->dma_buffers, dma_handle,
+			  remove);
 }
 
 void client_dma_buf_remove(struct codec_client *client,
-				  struct codec_dma_buf *buf)
+			   struct codec_dma_buf *buf)
 {
 	buf_remove(&client->dma_lock, buf);
 }
@@ -175,8 +167,8 @@ static void client_cleanup_event_list(struct list_head *events)
 
 static void client_cleanup(struct kref *ref)
 {
-	struct codec_client *client = container_of(ref, struct codec_client,
-						   refcount);
+	struct codec_client *client =
+		container_of(ref, struct codec_client, refcount);
 	struct codec_dev *dev = client->dev;
 
 	if (!list_empty(&client->cmds))
@@ -236,8 +228,8 @@ static void client_notify_fw(struct codec_dev *dev, struct codec_client *client)
 	int ret;
 
 	hdr.type = MSG_ITF_TYPE_CLIENT_LEAVE;
-	hdr.drv_client_hdl = ptr_2_hdl(client);
-	hdr.drv_cmd_hdl = 0;
+	hdr.driver_client_handle = ptr_2_hdl(client);
+	hdr.driver_command_handle = 0;
 	hdr.payload_len = 0;
 
 	ret = al_common_send(&dev->common, &hdr);
@@ -267,8 +259,9 @@ static void cmd_cleanup(struct kref *ref)
 	kfree(cmd);
 }
 
-static struct codec_cmd *cmd_create_and_insert(struct codec_client *client,
-					       struct codec_cmd_reply *cmd_reply)
+static struct codec_cmd *
+cmd_create_and_insert(struct codec_client *client,
+		      struct codec_cmd_reply *cmd_reply)
 {
 	struct codec_cmd *cmd;
 
@@ -327,16 +320,16 @@ static void cmd_remove(struct codec_client *client, struct codec_cmd *cmd)
 
 static int codec_open(struct inode *inode, struct file *file)
 {
-	struct codec_dev *dev = container_of(file->private_data, struct codec_dev,
-					     misc);
+	struct codec_dev *dev =
+		container_of(file->private_data, struct codec_dev, misc);
 
 	return client_create_and_insert(dev, file);
 }
 
 static int codec_release(struct inode *inode, struct file *file)
 {
-	struct codec_dev *dev = container_of(file->private_data, struct codec_dev,
-					     misc);
+	struct codec_dev *dev =
+		container_of(file->private_data, struct codec_dev, misc);
 	struct codec_client *client;
 
 	client = client_lookup(dev, file);
@@ -348,8 +341,7 @@ static int codec_release(struct inode *inode, struct file *file)
 	return 0;
 }
 
-static int codec_ioctl_cmd_reply(struct codec_dev *dev,
-				 unsigned long arg,
+static int codec_ioctl_cmd_reply(struct codec_dev *dev, unsigned long arg,
 				 struct codec_client *client)
 {
 	void __user *ubuf = (void __user *)arg;
@@ -381,8 +373,8 @@ static int codec_ioctl_cmd_reply(struct codec_dev *dev,
 		goto error;
 	}
 
-	req->drv_client_hdl = ptr_2_hdl(client);
-	req->drv_cmd_hdl = ptr_2_hdl(cmd);
+	req->driver_client_handle = ptr_2_hdl(client);
+	req->driver_command_handle = ptr_2_hdl(cmd);
 	ret = al_common_send(&dev->common, req);
 	if (ret)
 		goto error;
@@ -402,7 +394,9 @@ error:
 	return ret;
 }
 
-static struct codec_dma_buf *codec_dma_alloc(struct codec_dev *dev, struct codec_dma_info* info){
+static struct codec_dma_buf *codec_dma_alloc(struct codec_dev *dev,
+					     struct codec_dma_info *info)
+{
 	struct codec_dma_buf *buf;
 
 	buf = kmalloc(sizeof(*buf), GFP_KERNEL);
@@ -418,7 +412,7 @@ static struct codec_dma_buf *codec_dma_alloc(struct codec_dev *dev, struct codec
 	info->phy_addr = buf->dma_handle;
 	info->offset = buf->dma_handle;
 
-	if (!buf->cpu_mem) {
+	if (IS_ERR(buf->cpu_mem)) {
 		kfree(buf);
 		return ERR_PTR(-ENOMEM);
 	}
@@ -439,14 +433,13 @@ static int codec_ioctl_dma_alloc(struct codec_dev *dev, unsigned long arg,
 		return ret;
 
 	buf = codec_dma_alloc(dev, &info);
-	if(IS_ERR(buf))
+	if (IS_ERR(buf))
 		return PTR_ERR(buf);
 
 	ret = copy_to_user(ubuf, &info, sizeof(info));
 	if (ret) {
 		dma_free_coherent(&dev->common.pdev->dev, info.size,
-				  buf->cpu_mem,
-				  buf->dma_handle);
+				  buf->cpu_mem, buf->dma_handle);
 		kfree(buf);
 		return ret;
 	}
@@ -457,7 +450,7 @@ static int codec_ioctl_dma_alloc(struct codec_dev *dev, unsigned long arg,
 }
 
 static int codec_ioctl_dma_alloc_w_fd(struct codec_dev *dev, unsigned long arg,
-				 struct codec_client *client)
+				      struct codec_client *client)
 {
 	void __user *ubuf = (void __user *)arg;
 	struct codec_dma_info info;
@@ -470,14 +463,15 @@ static int codec_ioctl_dma_alloc_w_fd(struct codec_dev *dev, unsigned long arg,
 		return ret;
 
 	buf = codec_dma_alloc(dev, &info);
-	if(IS_ERR(buf))
+	if (IS_ERR(buf))
 		return PTR_ERR(buf);
 
-	dma_buf = codec_dmabuf_wrap(&dev->common.pdev->dev, info.size, buf, client);
+	dma_buf = codec_dmabuf_wrap(&dev->common.pdev->dev, info.size, buf,
+				    client);
 
 	if (IS_ERR(dma_buf))
 		return PTR_ERR(dma_buf);
-	
+
 	buf->dmabuf_handle = dma_buf;
 	info.fd = dma_buf_fd(dma_buf, O_RDWR);
 
@@ -508,7 +502,6 @@ static int codec_ioctl_dma_free(struct codec_dev *dev, unsigned long arg,
 	buf = client_dma_buf_lookup(client, info.phy_addr, true);
 	if (!buf)
 		return -EINVAL;
-
 
 	buf_free_dma_coherent(&dev->common.pdev->dev, buf);
 	kfree(buf);
@@ -547,8 +540,7 @@ static int codec_ioctl_fw_info(struct codec_dev *dev, unsigned long arg)
 	return 0;
 }
 
-static int codec_ioctl_get_event(struct codec_dev *dev,
-				 unsigned long arg,
+static int codec_ioctl_get_event(struct codec_dev *dev, unsigned long arg,
 				 struct codec_client *client)
 {
 	void __user *ubuf = (void __user *)arg;
@@ -563,9 +555,8 @@ static int codec_ioctl_get_event(struct codec_dev *dev,
 	mutex_lock(&client->event_lock);
 	while (list_empty(&client->events)) {
 		mutex_unlock(&client->event_lock);
-		ret = wait_event_interruptible_timeout(client->event_queue,
-						       !list_empty(&client->events),
-						       HZ);
+		ret = wait_event_interruptible_timeout(
+			client->event_queue, !list_empty(&client->events), HZ);
 		if (ret < 0)
 			return ret;
 		if (ret == 0)
@@ -589,8 +580,9 @@ static int codec_ioctl_get_event(struct codec_dev *dev,
 	return ret;
 }
 
-static int codec_ioctl_get_physical_address(struct codec_dev *dev, unsigned long arg,
-				struct codec_client *client) 
+static int codec_ioctl_get_physical_address(struct codec_dev *dev,
+					    unsigned long arg,
+					    struct codec_client *client)
 {
 	struct codec_dma_info info;
 	struct dma_buf *dbuf;
@@ -600,7 +592,6 @@ static int codec_ioctl_get_physical_address(struct codec_dev *dev, unsigned long
 
 	if (copy_from_user(&info, (struct al5_dma32_info *)arg, sizeof(info)))
 		return -EFAULT;
-
 
 	dbuf = dma_buf_get(info.fd);
 	if (IS_ERR(dbuf))
@@ -625,7 +616,7 @@ fail_map:
 fail_attach:
 	dma_buf_put(dbuf);
 
-	if(err)
+	if (err)
 		return err;
 
 	if (copy_to_user((void *)arg, &info, sizeof(info)))
@@ -634,11 +625,10 @@ fail_attach:
 	return 0;
 }
 
-
 static long codec_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
-	struct codec_dev *dev = container_of(file->private_data, struct codec_dev,
-					     misc);
+	struct codec_dev *dev =
+		container_of(file->private_data, struct codec_dev, misc);
 	struct codec_client *client = client_lookup(dev, file);
 	int ret;
 
@@ -673,14 +663,15 @@ static long codec_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 	default:
 		codec_err(dev, "unknown ioctl %x\n", cmd);
 		codec_err(dev, "Existing ioctls:\n");
-		codec_err(dev, "CODEC_FW_CMD_REPLY			:%lx\n",	CODEC_FW_CMD_REPLY);
-		codec_err(dev, "CODEC_DMA_ALLOC					:%lx\n",	CODEC_DMA_ALLOC);
-		codec_err(dev, "CODEC_DMA_ALLOC_WITH_FD	:%lx\n",	CODEC_DMA_ALLOC_WITH_FD);
-		codec_err(dev, "CODEC_DMA_FREE					:%lx\n",	CODEC_DMA_FREE);
-		codec_err(dev, "CODEC_GET_EVENT					:%lx\n",	CODEC_GET_EVENT);
-		codec_err(dev, "CODEC_DMA_FREE_MCU 			:%lx\n",	CODEC_DMA_FREE_MCU);
-		codec_err(dev, "CODEC_DMA_GET_PHY 			:%lx\n",	CODEC_DMA_GET_PHY);
-		codec_err(dev, "CODEC_GET_FW_INFO 			:%lx\n",	CODEC_GET_FW_INFO);
+		codec_err(dev, "CODEC_FW_CMD_REPLY: %lx\n", CODEC_FW_CMD_REPLY);
+		codec_err(dev, "CODEC_DMA_ALLOC: %lx\n", CODEC_DMA_ALLOC);
+		codec_err(dev, "CODEC_DMA_ALLOC_WITH_FD: %lx\n",
+			  CODEC_DMA_ALLOC_WITH_FD);
+		codec_err(dev, "CODEC_DMA_FREE: %lx\n", CODEC_DMA_FREE);
+		codec_err(dev, "CODEC_GET_EVENT: %lx\n", CODEC_GET_EVENT);
+		codec_err(dev, "CODEC_DMA_FREE_MCU: %lx\n", CODEC_DMA_FREE_MCU);
+		codec_err(dev, "CODEC_DMA_GET_PHY: %lx\n", CODEC_DMA_GET_PHY);
+		codec_err(dev, "CODEC_GET_FW_INFO: %lx\n", CODEC_GET_FW_INFO);
 		ret = -EINVAL;
 	}
 
@@ -689,8 +680,8 @@ static long codec_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 
 static int codec_mmap(struct file *file, struct vm_area_struct *vma)
 {
-	struct codec_dev *dev = container_of(file->private_data, struct codec_dev,
-					     misc);
+	struct codec_dev *dev =
+		container_of(file->private_data, struct codec_dev, misc);
 	struct codec_client *client = client_lookup(dev, file);
 	int ret;
 
@@ -699,7 +690,7 @@ static int codec_mmap(struct file *file, struct vm_area_struct *vma)
 
 	ret = buf_map(&client->dma_lock, &client->dma_buffers, vma,
 		      &dev->common.pdev->dev);
-	
+
 	if (ret)
 		return al_common_dma_buf_map(&dev->common, vma);
 
@@ -707,11 +698,11 @@ static int codec_mmap(struct file *file, struct vm_area_struct *vma)
 }
 
 static const struct file_operations codec_fops = {
-	.owner		= THIS_MODULE,
+	.owner = THIS_MODULE,
 	.unlocked_ioctl = codec_ioctl,
-	.open		= codec_open,
-	.release	= codec_release,
-	.mmap		= codec_mmap,
+	.open = codec_open,
+	.release = codec_release,
+	.mmap = codec_mmap,
 };
 
 static void handle_cmd_reply(struct codec_dev *dev, struct msg_itf_header *hdr)
@@ -720,16 +711,16 @@ static void handle_cmd_reply(struct codec_dev *dev, struct msg_itf_header *hdr)
 	struct codec_cmd *cmd = NULL;
 	int ret;
 
-	client = client_get(dev, hdr->drv_client_hdl);
+	client = client_get(dev, hdr->driver_client_handle);
 	if (!client) {
-		codec_dbg(dev, "Unable fo find client %p for reply %d\n",
-			  hdl_2_ptr(hdr->drv_client_hdl), hdr->type);
+		codec_dbg(dev, "Unable to find client %p for reply %d\n",
+			  hdl_2_ptr(hdr->driver_client_handle), hdr->type);
 		goto error;
 	}
 
-	cmd = cmd_get(client, hdr->drv_cmd_hdl);
+	cmd = cmd_get(client, hdr->driver_command_handle);
 	if (!cmd) {
-		codec_dbg(dev, "Unable fo find command\n");
+		codec_dbg(dev, "Unable to find command\n");
 		goto error;
 	}
 
@@ -768,10 +759,10 @@ static void handle_evt(struct codec_dev *dev, struct msg_itf_header *hdr,
 	struct codec_client *client;
 	int ret;
 
-	client = client_get(dev, hdr->drv_client_hdl);
+	client = client_get(dev, hdr->driver_client_handle);
 	if (!client) {
-		codec_dbg(dev, "Unable fo find client %p for evt %d\n",
-			  hdl_2_ptr(hdr->drv_client_hdl), type);
+		codec_dbg(dev, "Unable to find client %p for evt %d\n",
+			  hdl_2_ptr(hdr->driver_client_handle), type);
 		goto error;
 	}
 
@@ -830,12 +821,12 @@ static void codec_fw_ready(void *cb_arg)
 {
 	struct codec_dev *dev = cb_arg;
 	struct device *device = &dev->common.pdev->dev;
-	al_riscv_device_data *data;
+	struct device_data *data;
 	const char *device_name;
 	struct miscdevice *misc;
 	int ret;
 
-	data = (al_riscv_device_data *)of_device_get_match_data(device);
+	data = (struct device_data *)of_device_get_match_data(device);
 	if (!data) {
 		codec_err(dev, "Unable to find device data\n");
 		return;
@@ -855,15 +846,15 @@ static void codec_fw_ready(void *cb_arg)
 		dev->is_misc_init_done = 1;
 }
 
-int al_riscv_codec_probe(struct platform_device *pdev)
+static int codec_probe(struct platform_device *pdev)
 {
-	al_riscv_device_data *data;
+	struct device_data *data;
 	struct codec_dev *dev;
 	int ret;
 
 	dev_info(&pdev->dev, "Probing ...\n");
 
-	data = (al_riscv_device_data *)of_device_get_match_data(&pdev->dev);
+	data = (struct device_data *)of_device_get_match_data(&pdev->dev);
 	if (!data) {
 		dev_err(&pdev->dev, "Unable to find device data\n");
 		return -EINVAL;
@@ -889,9 +880,9 @@ int al_riscv_codec_probe(struct platform_device *pdev)
 }
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 11, 0)
-void al_riscv_codec_remove(struct platform_device *pdev)
+static void codec_remove(struct platform_device *pdev)
 #else
-int al_riscv_codec_remove(struct platform_device *pdev)
+static int codec_remove(struct platform_device *pdev)
 #endif
 {
 	struct codec_dev *dev = platform_get_drvdata(pdev);
@@ -906,3 +897,36 @@ int al_riscv_codec_remove(struct platform_device *pdev)
 	return al_common_remove(&dev->common);
 #endif
 }
+
+static const struct device_data ale2xx_data = {
+	.fw_name = "ale2xx.fw",
+	.default_device_name = "al_e2xx",
+};
+
+static const struct device_data ald3xx_data = {
+	.fw_name = "ald3xx.fw",
+	.default_device_name = "al_d3xx",
+};
+
+static const struct of_device_id al_codec_dt_match[] = {
+	{ .compatible = "al,ale2xx", .data = &ale2xx_data },
+	{ .compatible = "al,ald3xx", .data = &ald3xx_data },
+	{}
+};
+MODULE_DEVICE_TABLE(of, al_codec_dt_match);
+
+static struct platform_driver al_codec_driver = {
+	.driver			= {
+		.name		= "al_codec",
+		.of_match_table = of_match_ptr(al_codec_dt_match),
+	},
+	.probe			= codec_probe,
+	.remove			= codec_remove,
+};
+
+module_platform_driver(al_codec_driver);
+
+MODULE_LICENSE("GPL");
+MODULE_ALIAS("platform:al_codec");
+MODULE_AUTHOR("Mickael Guene <mickael.guene@allegrodvt.com>");
+MODULE_DESCRIPTION("Allegro DVT codec driver");

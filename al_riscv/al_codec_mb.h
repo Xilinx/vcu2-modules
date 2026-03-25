@@ -1,38 +1,48 @@
-/* 
- * al_codec_mb.h mailbox mechanisms. r/w messages to/from the mcu
- *
- * Copyright (C) 2024, Allegro DVT2 (www.allegrodvt.com)
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License version 2 as published by
- * the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along with
- * this program.  If not, see <http://www.gnu.org/licenses/>.
- */
+/******************************************************************************
+*
+* Copyright (C) 2019 Allegro DVT2.  All rights reserved.
+*
+******************************************************************************/
 
 #ifndef __AL_CODEC_MB__
 #define __AL_CODEC_MB__ 1
 
 #include <linux/mutex.h>
 #include <linux/types.h>
+#include <linux/clk.h>
+#include <linux/dma-mapping.h>
+#include <linux/interrupt.h>
+#include <linux/firmware.h>
+#include <linux/of_reserved_mem.h>
+#include <linux/slab.h>
+#include <linux/version.h>
 
-#include "mb_itf.h"
+#define DCACHE_LINE_SIZE 64
 
+/*
+ * struct codec_mb - Mbox header struct
+ *
+ * @data: transmitted/received data
+ * @size: size of data in bytes
+ * @hw : pointer to the hardware head register
+ * @lock:  protect the msg
+ */
 struct codec_mb {
-	struct mb_itf *hdr;
 	char *data;
-	int size;
+	size_t size;
+	void __iomem *hw;
 	struct mutex lock;
-};
+} __attribute__((aligned(DCACHE_LINE_SIZE)));
 
-void codec_mb_init(struct codec_mb *mb, char *addr, uint32_t magic, int size);
-int codec_mb_send(struct codec_mb *mb, char *data, int len);
-int codec_mb_receive(struct codec_mb *mb, char *data, int len);
+/* Mailbox direction enumeration */
+typedef enum {
+	MAILBOX_H2M = 0, /* Host to MCU */
+	MAILBOX_M2H = 1 /* MCU to Host */
+} mailbox_direction_t;
+
+void codec_mb_init(void __iomem *base_reg, struct codec_mb *mb, char *addr,
+		   size_t size, mailbox_direction_t direction);
+int codec_mb_send(struct codec_mb *mb, char *data, size_t len);
+int codec_mb_receive(struct codec_mb *mb, char *data, size_t len);
 
 #endif

@@ -1,18 +1,8 @@
-/*
- * Copyright (C) 2024, Allegro DVT2 (www.allegrodvt.com)
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License version 2 as published by
- * the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along with
- * this program.  If not, see <http://www.gnu.org/licenses/>.
- */
+/******************************************************************************
+*
+* Copyright (C) 2019 Allegro DVT2.  All rights reserved.
+*
+******************************************************************************/
 
 #include "al_buf.h"
 
@@ -20,8 +10,8 @@
 #include <linux/slab.h>
 #include <linux/version.h>
 
-static int buf_access(struct vm_area_struct *vma, unsigned long addr,
-		      void *buf, int len, int write)
+static int buf_access(struct vm_area_struct *vma, unsigned long addr, void *buf,
+		      int len, int write)
 {
 	struct codec_dma_buf *buffer = vma->vm_private_data;
 	unsigned long offset = addr - vma->vm_start;
@@ -60,8 +50,7 @@ void buf_remove(struct mutex *lock, struct codec_dma_buf *buf)
 	mutex_unlock(lock);
 }
 
-struct codec_dma_buf *buf_lookup(struct mutex *lock,
-				 struct list_head *head,
+struct codec_dma_buf *buf_lookup(struct mutex *lock, struct list_head *head,
 				 dma_addr_t dma_handle, bool remove)
 {
 	struct codec_dma_buf *res = NULL;
@@ -75,7 +64,7 @@ struct codec_dma_buf *buf_lookup(struct mutex *lock,
 		break;
 	}
 
-	if(res != NULL && remove)
+	if (res != NULL && remove)
 		list_del(&res->list);
 
 	mutex_unlock(lock);
@@ -85,8 +74,7 @@ struct codec_dma_buf *buf_lookup(struct mutex *lock,
 
 inline void buf_free_dma_coherent(struct device *dev, struct codec_dma_buf *buf)
 {
-	dma_free_coherent(dev, buf->size, buf->cpu_mem,
-						buf->dma_handle);
+	dma_free_coherent(dev, buf->size, buf->cpu_mem, buf->dma_handle);
 }
 
 void buf_cleanup_list(struct mutex *lock, struct list_head *head,
@@ -97,9 +85,10 @@ void buf_cleanup_list(struct mutex *lock, struct list_head *head,
 
 	mutex_lock(lock);
 	list_for_each_entry_safe(buf, next, head, list) {
-			dma_free_coherent(dev, buf->size, buf->cpu_mem,buf->dma_handle);
-			list_del(&buf->list);
-			kfree(buf);
+		dma_free_coherent(dev, buf->size, buf->cpu_mem,
+				  buf->dma_handle);
+		list_del(&buf->list);
+		kfree(buf);
 	}
 	mutex_unlock(lock);
 }
@@ -119,8 +108,7 @@ int buf_map(struct mutex *lock, struct list_head *head,
 		return -EINVAL;
 
 	vma->vm_pgoff = 0;
-	ret = dma_mmap_coherent(dev, vma, buf->cpu_mem,
-				buf->dma_handle, vsize);
+	ret = dma_mmap_coherent(dev, vma, buf->cpu_mem, buf->dma_handle, vsize);
 
 	if (ret < 0)
 		return ret;

@@ -1,4 +1,4 @@
-Allegro alXX_riscv video codec driver
+Allegro al_codec video codec driver
 
 Required Properties:
 - compatible: "al,ale2xx" or "al,ald3xx" respectively for encoder and decoder

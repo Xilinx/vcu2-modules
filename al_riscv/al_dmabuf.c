@@ -1,28 +1,18 @@
-/*
- * Copyright (C) 2024, Allegro DVT2 (www.allegrodvt.com)
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License version 2 as published by
- * the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along with
- * this program.  If not, see <http://www.gnu.org/licenses/>.
- */
-
-#include "al_dmabuf.h"
+/******************************************************************************
+*
+* Copyright (C) 2019 Allegro DVT2.  All rights reserved.
+*
+******************************************************************************/
 
 #include <linux/dma-buf.h>
 #include <linux/slab.h>
 #include <linux/version.h>
 
+#include "al_dmabuf.h"
+
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 13, 0)
 MODULE_IMPORT_NS("DMA_BUF");
-#elif LINUX_VERSION_CODE > KERNEL_VERSION(5,15,0)
+#elif LINUX_VERSION_CODE > KERNEL_VERSION(5, 15, 0)
 MODULE_IMPORT_NS(DMA_BUF);
 #endif
 
@@ -33,9 +23,7 @@ struct codec_dma_buf_priv {
 	struct device *dev;
 	struct sg_table *sgt;
 	enum dma_data_direction dma_dir;
-
 };
-
 
 struct codec_dma_buf_attachment {
 	struct sg_table sgt;
@@ -44,10 +32,11 @@ struct codec_dma_buf_attachment {
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 19, 0)
 /* device argument was removed */
-static int codec_dmabuf_attach(struct dma_buf *dbuf, struct dma_buf_attachment *dbuf_attach)
+static int codec_dmabuf_attach(struct dma_buf *dbuf,
+			       struct dma_buf_attachment *dbuf_attach)
 #else
 static int codec_dmabuf_attach(struct dma_buf *dbuf, struct device *dev,
-			     struct dma_buf_attachment *dbuf_attach)
+			       struct dma_buf_attachment *dbuf_attach)
 #endif
 {
 	struct codec_dma_buf_priv *dinfo = dbuf->priv;
@@ -92,7 +81,7 @@ static int codec_dmabuf_attach(struct dma_buf *dbuf, struct device *dev,
 }
 
 static void codec_dmabuf_detach(struct dma_buf *dbuf,
-			      struct dma_buf_attachment *db_attach)
+				struct dma_buf_attachment *db_attach)
 {
 	struct codec_dma_buf_attachment *attach = db_attach->priv;
 	struct sg_table *sgt;
@@ -108,16 +97,16 @@ static void codec_dmabuf_detach(struct dma_buf *dbuf,
 }
 
 static struct sg_table *codec_dmabuf_map(struct dma_buf_attachment *db_attach,
-				       enum dma_data_direction dma_dir)
+					 enum dma_data_direction dma_dir)
 {
 	struct codec_dma_buf_attachment *attach = db_attach->priv;
 	struct sg_table *sgt;
+
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 2, 0)
 	sgt = &attach->sgt;
 
-	if (attach->dma_dir == dma_dir) {
+	if (attach->dma_dir == dma_dir)
 		return sgt;
-	}
 
 	attach->dma_dir = dma_dir;
 #else
@@ -156,10 +145,9 @@ static struct sg_table *codec_dmabuf_map(struct dma_buf_attachment *db_attach,
 }
 
 static void codec_dmabuf_unmap(struct dma_buf_attachment *at,
-			     struct sg_table *sg, enum dma_data_direction dir)
+			       struct sg_table *sg, enum dma_data_direction dir)
 {
 }
-
 
 static int codec_dmabuf_mmap(struct dma_buf *dbuf, struct vm_area_struct *vma)
 {
@@ -178,7 +166,6 @@ static int codec_dmabuf_mmap(struct dma_buf *dbuf, struct vm_area_struct *vma)
 
 	ret = dma_mmap_coherent(dinfo->dev, vma, buffer->cpu_mem,
 				buffer->dma_handle, vsize);
-
 
 	if (ret < 0) {
 		pr_err("Remapping memory failed, error: %d\n", ret);
@@ -200,7 +187,6 @@ static void codec_dmabuf_release(struct dma_buf *dbuf)
 	struct codec_dma_buf *buffer = dinfo->buffer;
 
 	if (dinfo->sgt) {
-    dma_unmap_sgtable(dinfo->dev, dinfo->sgt, dinfo->dma_dir, 0);
 		sg_free_table(dinfo->sgt);
 		kfree(dinfo->sgt);
 	}
@@ -208,7 +194,6 @@ static void codec_dmabuf_release(struct dma_buf *dbuf)
 	client_dma_buf_remove(dinfo->client, buffer);
 
 	buf_free_dma_coherent(dinfo->dev, buffer);
-
 
 	put_device(dinfo->dev);
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 9, 0)
@@ -218,7 +203,6 @@ static void codec_dmabuf_release(struct dma_buf *dbuf)
 #endif
 	kfree(dinfo);
 }
-
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 8, 0)
 static void *al5_dmabuf_kmap(struct dma_buf *dbuf, unsigned long page_num)
@@ -257,31 +241,30 @@ static void *codec_dmabuf_vmap(struct dma_buf *dbuf)
 }
 
 static const struct dma_buf_ops codec_dma_buf_ops = {
-	.attach		= codec_dmabuf_attach,
-	.detach		= codec_dmabuf_detach,
-	.map_dma_buf	= codec_dmabuf_map,
-	.unmap_dma_buf	= codec_dmabuf_unmap,
+	.attach = codec_dmabuf_attach,
+	.detach = codec_dmabuf_detach,
+	.map_dma_buf = codec_dmabuf_map,
+	.unmap_dma_buf = codec_dmabuf_unmap,
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 12, 0)
 /* the map_atomic interface was removed after 4.19 */
 #if LINUX_VERSION_CODE < KERNEL_VERSION(4, 19, 0)
-	.map_atomic	= al5_dmabuf_kmap,
+	.map_atomic = al5_dmabuf_kmap,
 #endif
 /* the map interface was removed in 5.8 */
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 8, 0)
-	.map		= al5_dmabuf_kmap,
+	.map = al5_dmabuf_kmap,
 #endif
 #else
-	.kmap_atomic	= al5_dmabuf_kmap,
-	.kmap		= al5_dmabuf_kmap,
+	.kmap_atomic = al5_dmabuf_kmap,
+	.kmap = al5_dmabuf_kmap,
 #endif
-	.vmap		= codec_dmabuf_vmap,
-	.mmap		= codec_dmabuf_mmap,
-	.release	= codec_dmabuf_release,
+	.vmap = codec_dmabuf_vmap,
+	.mmap = codec_dmabuf_mmap,
+	.release = codec_dmabuf_release,
 };
 
 static void define_export_info(struct dma_buf_export_info *exp_info,
-			       size_t size,
-			       void *priv)
+			       size_t size, void *priv)
 {
 	exp_info->owner = THIS_MODULE;
 	exp_info->exp_name = KBUILD_MODNAME;
@@ -292,9 +275,9 @@ static void define_export_info(struct dma_buf_export_info *exp_info,
 	exp_info->priv = priv;
 }
 
-static inline struct sg_table *codec_create_sgt(struct codec_dma_buf_priv *dinfo)
+static inline struct sg_table *
+codec_create_sgt(struct codec_dma_buf_priv *dinfo)
 {
-	enum dma_data_direction direction = dinfo->dma_dir;
 	struct codec_dma_buf *buf = dinfo->buffer;
 	struct device *dev = dinfo->dev;
 	struct sg_table *sgt;
@@ -302,38 +285,34 @@ static inline struct sg_table *codec_create_sgt(struct codec_dma_buf_priv *dinfo
 
 	sgt = kzalloc(sizeof(*sgt), GFP_KERNEL);
 	if (!sgt)
-    return ERR_PTR(-ENOMEM);
+		return ERR_PTR(-ENOMEM);
 
 	// We can do that only because we use the incoherent DMA API ?
 	// See kernel-doc comment of `dma_get_sgtable()`
 	err = dma_get_sgtable(dev, sgt, buf->cpu_mem, buf->dma_handle,
 			      buf->size);
-	if (err)
-	  goto free_sgt;
-
-	err = dma_map_sgtable(dev, sgt, direction, 0);
-	if (err)
+	if (err < 0)
 		goto free_sgt;
 
 	return sgt;
 
 free_sgt:
-  sg_free_table(sgt);
-  kfree(sgt);
+	sg_free_table(sgt);
+	kfree(sgt);
 
-  return ERR_PTR(err);
+	return ERR_PTR(err);
 }
 
 struct dma_buf *codec_dmabuf_wrap(struct device *dev, size_t size,
-								struct codec_dma_buf *buffer,
-								struct codec_client *client)
+				  struct codec_dma_buf *buffer,
+				  struct codec_client *client)
 {
 	struct dma_buf *dma_buf;
 	struct codec_dma_buf_priv *dinfo;
 
 	DEFINE_DMA_BUF_EXPORT_INFO(exp_info);
 
-	if(IS_ERR(buffer) || IS_ERR(client))
+	if (IS_ERR_OR_NULL(buffer) || IS_ERR_OR_NULL(client))
 		return ERR_PTR(-ENOMEM);
 
 	dinfo = kzalloc(sizeof(*dinfo), GFP_KERNEL);
@@ -346,15 +325,13 @@ struct dma_buf *codec_dmabuf_wrap(struct device *dev, size_t size,
 	dinfo->dma_dir = DMA_BIDIRECTIONAL;
 	dinfo->sgt = codec_create_sgt(dinfo);
 
-	define_export_info(&exp_info,
-			   buffer->size,
-			   (void *)dinfo);
+	define_export_info(&exp_info, buffer->size, (void *)dinfo);
 
 	if (IS_ERR(dinfo->sgt))
 		dinfo->sgt = codec_create_sgt(dinfo);
 
 	if (IS_ERR(dinfo->sgt)) {
-	  pr_err("Failed to create the sg table\n");
+		pr_err("Failed to create the sg table\n");
 		goto free_sgt;
 	}
 

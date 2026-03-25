@@ -2,39 +2,38 @@
 
 ## Summary
 
-This repository contains the source code of ale2_riscv(encoder), ald3_riscv(decoder) drivers.
+This repository contains the source code of al\_codec driver.
 
-The alXX_riscv drivers are used by the soft codec repository and other control
+The al\_codec driver is used by the soft codec repository and other control
 software to access services provided by riscv firmware located inside hw ip.
 
 ## Building
 
-To build drivers you need a linux kernel build tree. Give location of
+To build al\_codec driver you need a linux kernel build tree. Give location of
 kernel build tree using KDIR environment variable.
-It you are cross-compiling then define ARCH and CROSS_COMPILE environment
+It you are cross-compiling then define ARCH and CROSS\_COMPILE environment
 variable.
 
 ```
 $ ARCH=arm CROSS_COMPILE=arm-linux-gnueabihf- KDIR=linux-headers-dir make
 ```
 
-Compiled kernel modules are located in al_riscv/ale2_riscv.ko and al_riscv/ald3_riscv.ko .
+Compiled kernel module is located in al\_riscv/al\_codec.ko
 
-## Using on a board with riscv fw
+## Using on a board
 
-Copy decoder and/or encoder fw with correct name in board /lib/firmware directory.
-Copy ale2_riscv.ko and/or ald3_riscv.ko to your board and insert it.
+Copy decoder or/and encoder fw with correct name in board /lib/firmware directory.
+Copy al\_codec.ko on your board and insert it.
 Decoder firmware must be located in /lib/firmware/ald3xx.fw file.
 Encoder firmware must be located in /lib/firmware/ale2xx.fw file.
 
 ```
-$ insmod ale2_riscv.ko
-$ insmod ald3_riscv.ko
+$ insmod al_codec.ko
 ```
 
-## Device Tree Bindings for ald3_riscv and ale2_riscv
+## Device Tree Bindings
 
 You can change configure some of the behavior of driver using device tree
 bindings.
-See the device-tree-bindings-alXX_riscv.txt file for more information about available
+See the device-tree-bindings.txt file for more information about available
 bindings.
