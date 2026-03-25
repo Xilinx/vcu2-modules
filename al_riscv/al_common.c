@@ -70,12 +70,13 @@
 #define AL_CODEC_DATA_OFFSET_MSB                        0x0458
 #define AL_CODEC_DATA_OFFSET_LSB                        0x045C
 #define AL_CODEC_MCU_BOOT_TIMEOUT_RATIO                 (15000000000)
-#define MCU_VIRTUAL_SIZE                                (254ULL * 1024 * 1024 * 1024)  /* 254GB */
+#define MCU_VIRTUAL_SIZE                                (256ULL * 1024 * 1024 * 1024)  /* 254GB */
 
 #define MACHINE_ID_1                                    1
 #define MACHINE_ID_2                                    2
 #define MACHINE_ID_2_IP_OFFSET                          0x06000000
 #define MACHINE_ID_2_APB_MASK                           0x07ffffff
+#define MACHINE_ID_2_ALIGN                              0x04000000
 
 #define common_dbg(__dev, fmt, ...) \
 	dev_dbg(&__dev->pdev->dev, fmt, ## __VA_ARGS__)
@@ -448,8 +449,8 @@ static int common_alloc_and_setup_fw_memory(struct al_common_dev *dev,
 
 	common_info(dev, "periph_addr = 0x%016llx\n", dev->periph_addr);
 
-	common_writel(dev, AL_CODEC_MCU_PERIPHERAL_ADDR_LSB, lower_32_bits(dev->periph_addr));
 	common_writel(dev, AL_CODEC_MCU_PERIPHERAL_ADDR_MSB, upper_32_bits(dev->periph_addr));
+	common_writel(dev, AL_CODEC_MCU_PERIPHERAL_ADDR_LSB, lower_32_bits(dev->periph_addr));
 
 	return 0;
 }
@@ -495,12 +496,13 @@ static void common_fw_callback(const struct firmware *fw, void *context)
 	  goto error_release;
 	}
 
+  dev->periph_addr = ALIGN(res->start + MACHINE_ID_2_IP_OFFSET,
+                           MACHINE_ID_2_ALIGN);
+
 	if (res->start & MACHINE_ID_2_APB_MASK) {
 		common_err(dev, "apb start address is invalid\n");
 	  goto error_release;
 	}
-
-  dev->periph_addr = res->start;
 
 	ret = common_alloc_and_setup_fw_memory(dev, &bh);
 	if (ret) {
