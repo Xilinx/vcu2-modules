@@ -18,7 +18,6 @@
 #include <linux/slab.h>
 
 #include "al_common.h"
-#include "al_buf.h"
 #include "al_codec_msg.h"
 
 #define AL_BOOT_HEADER_OFFSET 0
@@ -49,6 +48,8 @@
 #define AL_CODEC_INSTRUCTION_OFFSET_LSB 0x0454
 #define AL_CODEC_DATA_OFFSET_MSB 0x0458
 #define AL_CODEC_DATA_OFFSET_LSB 0x045C
+#define AL_CODEC_MCU_BOOT_TIMEOUT_RATIO (15000000000)
+#define MCU_VIRTUAL_SIZE (256ULL * 1024 * 1024 * 1024) /* 256GB */
 
 /* Register configuration */
 #define AL_CODEC_IRQ_MCU_2_CPU BIT(30)
@@ -60,6 +61,7 @@
 #define MACHINE_ID_2 2
 #define MACHINE_ID_2_IP_OFFSET 0x06000000
 #define MACHINE_ID_2_APB_MASK 0x07ffffff
+#define MACHINE_ID_2_ALIGN 0x04000000
 
 /* Mailbox interface */
 #define MAILBOX_IFT_VERSION 0x00010000
@@ -68,6 +70,14 @@
 
 /* For inter-comm mailboxes */
 #define IMAILBOX_SIZE 4096 /* 4KB size */
+
+/* Backwards compatibility: use 0 if kernel
+ * lacks DMA_ATTR_INVALIDATE_LINEAR_MAP */
+#ifdef DMA_ATTR_INVALIDATE_LINEAR_MAP
+#define AL_DMA_ATTR_LINEAR_MAP DMA_ATTR_INVALIDATE_LINEAR_MAP
+#else
+#define AL_DMA_ATTR_LINEAR_MAP 0
+#endif
 
 /* Debug macros */
 #define common_dbg(__dev, fmt, ...) \
@@ -119,7 +129,46 @@ struct boot_header {
 /*******************************************************************************
  * HELPER FUNCTIONS
  ******************************************************************************/
-static bool process_mcu_messages(struct al_mcu_instance *mcu);
+static inline void process_mcu_messages(struct al_mcu_instance *mcu);
+
+/**
+ * get_mcu_offset: Calculate MCU offset based on reserved memory location
+ * This function now properly handles both high and low physical addresses
+ * by creating a mapping window that accommodates the reserved memory region
+ *
+ * @param reserved_mem_start: Start of reserved memory region
+ * @param reserved_mem_size: Size of reserved memory region
+ * @return: Offset for MCU address translation
+ */
+static inline u64 get_mcu_offset(u64 reserved_mem_start, u64 reserved_mem_size)
+{
+	uint64_t reserved_mem_end = reserved_mem_start + reserved_mem_size;
+
+	if (reserved_mem_end <= MCU_VIRTUAL_SIZE)
+		return 0;
+
+	if (reserved_mem_size <= MCU_VIRTUAL_SIZE)
+		return reserved_mem_start;
+
+	return reserved_mem_start;
+}
+
+static inline u64 get_machine_boot_addr(struct al_common_dev *dev,
+					struct al_mcu_instance *mcu,
+					const struct boot_header *bh)
+{
+	if (bh->machine_id == MACHINE_ID_1)
+		return bh->boot_addr;
+
+	u64 boot_addr = mcu->fw_phys_addr - mcu->offset;
+	return ((bh->boot_addr - bh->vaddr_start) + boot_addr);
+}
+
+/* Get the boot timeout using the clock rate (in msecs ) */
+static inline uint32_t estimate_boot_timeout(uint32_t clk_rate)
+{
+	return (uint32_t)(AL_CODEC_MCU_BOOT_TIMEOUT_RATIO / clk_rate);
+}
 
 /* Read/Write operations for MCU registers */
 static inline u32 common_readl(struct al_mcu_instance *mcu, u32 offset)
@@ -221,7 +270,8 @@ static void *common_dma_alloc_coherent(struct al_common_dev *dev, size_t size,
 {
 	void *cpu_mem;
 
-	cpu_mem = dma_alloc_coherent(&dev->pdev->dev, size, dma_handle, gfp);
+	cpu_mem = dma_alloc_attrs(&dev->pdev->dev, size, dma_handle, gfp,
+				  AL_DMA_ATTR_LINEAR_MAP);
 	if (!cpu_mem) {
 		common_err(dev, "Failed to allocate %zu bytes of DMA memory\n",
 			   size);
@@ -231,7 +281,15 @@ static void *common_dma_alloc_coherent(struct al_common_dev *dev, size_t size,
 	common_dbg(dev,
 		   "Allocated DMA: cpu_mem=%p, dma_handle=%pad, size=%zu\n",
 		   cpu_mem, dma_handle, size);
+
 	return cpu_mem;
+}
+
+static void common_dma_free_coherent(struct al_common_dev *dev, size_t size,
+				     void *cpu_addr, dma_addr_t dma_handle)
+{
+	dma_free_attrs(&dev->pdev->dev, size, cpu_addr, dma_handle,
+		       AL_DMA_ATTR_LINEAR_MAP);
 }
 
 /* Reset a single MCU */
@@ -287,43 +345,29 @@ static bool validate_firmware(struct al_common_dev *dev,
 	/* Parse boot header from firmware */
 	fw_bh = (const struct boot_header *)(fw->data + AL_BOOT_HEADER_OFFSET);
 
-	/* Copy boot header with proper endianness conversion */
-	bh->bh_version = le32_to_cpu(fw_bh->bh_version);
-	bh->fw_version = le32_to_cpu(fw_bh->fw_version);
-	bh->mb_version = le32_to_cpu(fw_bh->mb_version);
-	memcpy(bh->model, fw_bh->model, sizeof(bh->model));
-	bh->vaddr_start = le64_to_cpu(fw_bh->vaddr_start);
-	bh->vaddr_end = le64_to_cpu(fw_bh->vaddr_end);
-	bh->boot_addr = le64_to_cpu(fw_bh->boot_addr);
-
-	/* Mailbox headers */
-	bh->h2m.magic = le32_to_cpu(fw_bh->h2m.magic);
-	bh->h2m.start = le64_to_cpu(fw_bh->h2m.start);
-	bh->h2m.end = le64_to_cpu(fw_bh->h2m.end);
-	bh->m2h.magic = le32_to_cpu(fw_bh->m2h.magic);
-	bh->m2h.start = le64_to_cpu(fw_bh->m2h.start);
-	bh->m2h.end = le64_to_cpu(fw_bh->m2h.end);
-
-	bh->machine_id = le64_to_cpu(fw_bh->machine_id);
-
 	/* Validate machine ID */
-	if (bh->machine_id != MACHINE_ID_1 && bh->machine_id != MACHINE_ID_2) {
-		common_err(dev, "Invalid machine_id: %llu\n", bh->machine_id);
+	if (fw_bh->machine_id != MACHINE_ID_1 &&
+	    fw_bh->machine_id != MACHINE_ID_2) {
+		common_err(dev, "Invalid machine_id: %llu\n",
+			   fw_bh->machine_id);
 		return false;
 	}
 
 	/* Validate mailbox magic numbers */
-	if (bh->h2m.magic != MAILBOX_IFT_MAGIC_H2M) {
+	if (fw_bh->h2m.magic != MAILBOX_IFT_MAGIC_H2M) {
 		common_err(dev, "Invalid H2M mailbox magic: 0x%08x\n",
-			   bh->h2m.magic);
+			   fw_bh->h2m.magic);
 		return false;
 	}
 
-	if (bh->m2h.magic != MAILBOX_IFT_MAGIC_M2H) {
+	if (fw_bh->m2h.magic != MAILBOX_IFT_MAGIC_M2H) {
 		common_err(dev, "Invalid M2H mailbox magic: 0x%08x\n",
-			   bh->m2h.magic);
+			   fw_bh->m2h.magic);
 		return false;
 	}
+
+	/* Copy the firmware boot_header*/
+	memcpy(bh, fw_bh, sizeof(*bh));
 
 	common_dbg(
 		dev,
@@ -334,15 +378,11 @@ static bool validate_firmware(struct al_common_dev *dev,
 }
 
 /**
- * copy_firmware_to_mcu - Copy firmware to MCU DMA memory
+ * copy_firmware_to_mcu - Copy the firmware to the allocated DMA memory for the MCU.
  * @dev: Device structure
  * @mcu: MCU instance
  * @fw: Firmware data
  * @bh: Boot header (will be updated with runtime data)
- *
- * This function copies the firmware to the allocated DMA memory for the MCU,
- * using proper endianness conversion (le32_to_cpu) and filling in the
- * boot header with runtime information.
  *
  * Returns: 0 on success, negative error code on failure
  */
@@ -355,7 +395,6 @@ static int copy_firmware_to_mcu(struct al_common_dev *dev,
 	u32 *dst;
 	size_t i, num_words;
 	struct boot_header *bh_dst;
-	u64 periph_addr;
 
 	if (!mcu->fw_cpu_mem) {
 		common_err(dev, "MCU %d: No DMA memory allocated\n",
@@ -385,22 +424,19 @@ static int copy_firmware_to_mcu(struct al_common_dev *dev,
 	bh_dst = (struct boot_header *)((u8 *)mcu->fw_cpu_mem +
 					AL_BOOT_HEADER_OFFSET);
 
-	/* Calculate peripheral address based on machine ID */
-	if (bh->machine_id == MACHINE_ID_2) {
-		periph_addr = (mcu->apb_addr) + MACHINE_ID_2_IP_OFFSET;
-	} else {
-		periph_addr = dev->regs_info.start;
-	}
-
 	/* Fill the mcu index */
 	bh_dst->mcu_id = mcu->mcu_id;
 	bh_dst->imb_info.num_mcus = dev->num_mcus;
 
 	/* Fill runtime data in boot header */
-	bh_dst->ip_start = cpu_to_le64(periph_addr);
-	bh_dst->ip_end =
-		cpu_to_le64(periph_addr + resource_size(&dev->regs_info));
-	bh_dst->mcu_clk_rate = cpu_to_le64(mcu->mcu_clk_rate);
+	mcu->apb_addr = (bh->machine_id == MACHINE_ID_2) ? mcu->apb_addr :
+							   dev->regs_info.start;
+	bh_dst->ip_start = mcu->apb_addr + MACHINE_ID_2_IP_OFFSET;
+	bh_dst->ip_end = bh_dst->ip_start + resource_size(&dev->regs_info);
+
+	/* Keep the default clk_rate in case the clk is not specified */
+	if (mcu->clk_rate)
+		bh_dst->mcu_clk_rate = mcu->clk_rate;
 
 	if (dev->num_mcus > 1) {
 		for (i = 0; i < dev->num_mcus; i++)
@@ -411,11 +447,29 @@ static int copy_firmware_to_mcu(struct al_common_dev *dev,
 	/* Ensure data is written to memory */
 	wmb();
 
+	if (bh->machine_id == MACHINE_ID_2) {
+		/* Configure MCU peripheral address */
+		common_writel(mcu, AL_CODEC_MCU_PERIPHERAL_ADDR_MSB,
+			      upper_32_bits(mcu->apb_addr));
+		common_writel(mcu, AL_CODEC_MCU_PERIPHERAL_ADDR_LSB,
+			      lower_32_bits(mcu->apb_addr));
+	}
+
+	/* Configure instruction and data offsets */
+	common_writel(mcu, AL_CODEC_INSTRUCTION_OFFSET_MSB,
+		      upper_32_bits(mcu->offset));
+	common_writel(mcu, AL_CODEC_INSTRUCTION_OFFSET_LSB,
+		      lower_32_bits(mcu->offset));
+	common_writel(mcu, AL_CODEC_DATA_OFFSET_MSB,
+		      upper_32_bits(mcu->offset));
+	common_writel(mcu, AL_CODEC_DATA_OFFSET_LSB,
+		      lower_32_bits(mcu->offset));
+
 	common_dbg(
 		dev,
-		"MCU %d: Firmware copied, ip_start=0x%llx, ip_end=0x%llx, clk_rate=%lu\n",
-		mcu->mcu_id, bh_dst->ip_start, bh_dst->ip_end,
-		mcu->mcu_clk_rate);
+		"MCU %d: Firmware copied, ip_start=0x%llx, ip_end=0x%llx, clk_rate=%lu, apb_addr=0x%llx, I/D offset=0x%llx\n",
+		mcu->mcu_id, bh_dst->ip_start, bh_dst->ip_end, mcu->clk_rate,
+		mcu->apb_addr, mcu->offset);
 
 	/* Store firmware version */
 	mcu->fw_version = bh->fw_version;
@@ -480,48 +534,16 @@ static int init_mcu_mailbox(struct al_common_dev *dev,
 static int start_mcu(struct al_common_dev *dev, struct al_mcu_instance *mcu,
 		     const struct boot_header *bh)
 {
-	u64 boot_addr_phys;
-	u64 periph_addr;
-	u64 instr_offset;
-	u64 data_offset;
-
 	/* Calculate physical boot address */
-	boot_addr_phys = mcu->fw_phys_addr + (bh->boot_addr - bh->vaddr_start);
-
-	/* Calculate peripheral address */
-	if (bh->machine_id == MACHINE_ID_2) {
-		periph_addr = mcu->apb_addr;
-	} else {
-		periph_addr = mcu->apb_addr;
-	}
-
-	/* Calculate offsets */
-	/* instr_offset = mcu->fw_phys_addr - bh->vaddr_start; */
-	/* data_offset = instr_offset; */
-	instr_offset = 0;
-	data_offset = instr_offset;
+	u64 boot_addr = get_machine_boot_addr(dev, mcu, bh);
+	/* Estimate the boot time using the clk rate */
+	u64 boot_timeout = max(estimate_boot_timeout(mcu->clk_rate), (u32)2000);
 
 	/* Configure MCU boot address */
 	common_writel(mcu, AL_CODEC_MCU_BOOT_ADDR_MSB,
-		      upper_32_bits(boot_addr_phys));
+		      upper_32_bits(boot_addr));
 	common_writel(mcu, AL_CODEC_MCU_BOOT_ADDR_LSB,
-		      lower_32_bits(boot_addr_phys));
-
-	/* Configure MCU peripheral address */
-	common_writel(mcu, AL_CODEC_MCU_PERIPHERAL_ADDR_MSB,
-		      upper_32_bits(periph_addr));
-	common_writel(mcu, AL_CODEC_MCU_PERIPHERAL_ADDR_LSB,
-		      lower_32_bits(periph_addr));
-
-	/* Configure instruction and data offsets */
-	common_writel(mcu, AL_CODEC_INSTRUCTION_OFFSET_MSB,
-		      upper_32_bits(instr_offset));
-	common_writel(mcu, AL_CODEC_INSTRUCTION_OFFSET_LSB,
-		      lower_32_bits(instr_offset));
-	common_writel(mcu, AL_CODEC_DATA_OFFSET_MSB,
-		      upper_32_bits(data_offset));
-	common_writel(mcu, AL_CODEC_DATA_OFFSET_LSB,
-		      lower_32_bits(data_offset));
+		      lower_32_bits(boot_addr));
 
 	/* Start MCU clock and release reset */
 	common_writel(mcu, AL_CODEC_MCU_CLK, AL_CODEC_REG_ENABLE);
@@ -529,15 +551,14 @@ static int start_mcu(struct al_common_dev *dev, struct al_mcu_instance *mcu,
 	/* This should be set, or the irq handler will disable the irq*/
 	mcu->active = true;
 
-	if (wait_for_completion_timeout(&mcu->done, 5 * HZ) <= 0) {
+	if (wait_for_completion_timeout(&mcu->done,
+					msecs_to_jiffies(boot_timeout)) <= 0) {
 		mcu->active = false;
 		return -ETIMEDOUT;
 	}
 
-	common_dbg(
-		dev,
-		"MCU %d (%s): Started - boot_addr=0x%llx, periph_addr=0x%llx\n",
-		mcu->mcu_id, mcu->name, boot_addr_phys, periph_addr);
+	common_dbg(dev, "MCU %d (%s): Started - boot_addr=0x%llx\n",
+		   mcu->mcu_id, mcu->name, boot_addr);
 
 	return 0;
 }
@@ -571,7 +592,7 @@ static int load_firmware_to_mcus(struct al_common_dev *dev,
 		mcu = &dev->mcus[i];
 
 		mcu->fw_size = bh.vaddr_end - bh.vaddr_start;
-		mcu->fw_cpu_mem = common_dma_alloc_coherent(
+		mcu->fw_cpu_mem = common_dma_alloc(
 			dev, mcu->fw_size, &mcu->fw_phys_addr, GFP_KERNEL);
 		if (IS_ERR(mcu->fw_cpu_mem)) {
 			common_err(
@@ -584,7 +605,7 @@ static int load_firmware_to_mcus(struct al_common_dev *dev,
 
 		/* Allocate buffer for the inter-comm mailboxes */
 		if (dev->num_mcus > 1) {
-			mcu->imb.virt = common_dma_alloc_coherent(
+			mcu->imb.virt = common_dma_alloc(
 				dev, IMAILBOX_SIZE, &mcu->imb.phys, GFP_KERNEL);
 			if (IS_ERR(mcu->imb.virt)) {
 				common_err(
@@ -632,18 +653,17 @@ error_cleanup:
 	/* Cleanup: Free any allocated DMA memory */
 	for (i = 0; i < dev->num_mcus; i++) {
 		if (dev->mcus[i].fw_cpu_mem) {
-			dma_free_coherent(&dev->pdev->dev, dev->mcus[i].fw_size,
-					  dev->mcus[i].fw_cpu_mem,
-					  dev->mcus[i].fw_phys_addr);
+			common_dma_free(dev, dev->mcus[i].fw_size,
+					dev->mcus[i].fw_cpu_mem,
+					dev->mcus[i].fw_phys_addr);
 
 			dev->mcus[i].fw_cpu_mem = NULL;
 		}
 
 		if (dev->mcus[i].imb.virt) {
-			dma_free_coherent(&dev->pdev->dev,
-					  dev->mcus[i].imb.size,
-					  dev->mcus[i].imb.virt,
-					  dev->mcus[i].imb.phys);
+			common_dma_free(dev, dev->mcus[i].imb.size,
+					dev->mcus[i].imb.virt,
+					dev->mcus[i].imb.phys);
 
 			dev->mcus[i].imb.virt = NULL;
 		}
@@ -682,9 +702,8 @@ static void common_fw_callback(const struct firmware *fw, void *context)
 	release_firmware(fw);
 
 	/* Notify client that firmware is ready */
-	if (dev->fw_ready_cb) {
+	if (dev->fw_ready_cb)
 		dev->fw_ready_cb(dev->cb_arg);
-	}
 
 	common_dbg(dev, "Firmware initialization complete\n");
 }
@@ -756,7 +775,7 @@ static irqreturn_t common_hardirq_handler(int irq, void *arg)
 		irq_status = common_readl(mcu, AL_CODEC_IRQ_STATUS_CLEAR);
 		if (irq_status) {
 			common_writel(mcu, AL_CODEC_IRQ_STATUS_CLEAR,
-				      irq_status);
+				      AL_CODEC_IRQ_MCU_2_CPU);
 
 			/* Queue work - workqueue was created at probe */
 			queue_work(dev->irq_wq, &mcu->irq_work);
@@ -792,7 +811,7 @@ static int parse_mcu_clock(struct al_common_dev *dev,
 	if (IS_ERR(clk)) {
 		common_warn(dev, "MCU %d: No clock specified, using default\n",
 			    mcu->mcu_id);
-		mcu->mcu_clk_rate = 0;
+		mcu->clk_rate = 0;
 		return 0;
 	}
 
@@ -805,10 +824,10 @@ static int parse_mcu_clock(struct al_common_dev *dev,
 	}
 
 	mcu->clk = clk;
-	mcu->mcu_clk_rate = clk_get_rate(clk);
+	mcu->clk_rate = clk_get_rate(clk);
 
 	common_info(dev, "MCU %d: Clock enabled, rate=%lu Hz\n", mcu->mcu_id,
-		    mcu->mcu_clk_rate);
+		    mcu->clk_rate);
 
 	return 0;
 }
@@ -862,7 +881,8 @@ static int parse_mcu_subnode(struct al_common_dev *dev,
 	mcu->apb_addr = apb_addr;
 
 	/* TODO: Calculate offset (for 39-bit physical address limitation) */
-	mcu->offset = 0;
+	mcu->offset =
+		get_mcu_offset(dev->reserved_mem_start, dev->reserved_mem_size);
 
 	/* Parse optional MCU name */
 	ret = of_property_read_string(mcu_node, "mcu-name", &name);
@@ -878,9 +898,11 @@ static int parse_mcu_subnode(struct al_common_dev *dev,
 	if (ret)
 		return ret;
 
-	common_dbg(dev, "MCU %d (%s): Parsed - regs=0x%llx, apb=0x%llx\n",
-		   mcu_id, mcu->name, (u64)dev->regs_info.start + mcu_offset,
-		   apb_addr);
+	common_dbg(
+		dev,
+		"MCU %d (%s): Parsed - regs=0x%llx, apb=0x%llx, I/D offset=0x%llx\n",
+		mcu_id, mcu->name, (u64)dev->regs_info.start + mcu_offset,
+		apb_addr, mcu->offset);
 
 	return 0;
 }
@@ -988,27 +1010,24 @@ static int parse_single_mcu_dt(struct al_common_dev *dev)
 
 	mcu = &dev->mcus[0];
 	mcu->mcu_id = 0;
+	mcu->apb_addr = 0;
 	mcu->is_master = true;
 	mcu->active = false;
 	init_completion(&mcu->done);
 	strncpy(mcu->name, "MCU0", sizeof(mcu->name));
 
-	mcu->regs = devm_ioremap_resource(&dev->pdev->dev, &dev->regs_info);
-	if (IS_ERR(mcu->regs)) {
-		common_err(dev, "Single MCU: failed to map registers\n");
-		return PTR_ERR(mcu->regs);
-	}
-
 	/* Parse APB address */
 	res = platform_get_resource_byname(dev->pdev, IORESOURCE_MEM, "apb");
 	if (res) {
-		mcu->apb_addr = res->start;
-	} else {
+		mcu->apb_addr = ALIGN(res->start + MACHINE_ID_2_IP_OFFSET,
+				      MACHINE_ID_2_ALIGN);
+	} else
 		common_warn(dev, "Single MCU: No APB resource\n");
-		mcu->apb_addr = 0;
-	}
 
+	mcu->regs = dev->regs;
+	mcu->regs_info = &dev->regs_info;
 	mcu->offset = 0;
+	mcu->clk_rate = 0;
 
 	/* Parse clock from device level */
 	clk = devm_clk_get(&dev->pdev->dev, "mcu");
@@ -1016,20 +1035,21 @@ static int parse_single_mcu_dt(struct al_common_dev *dev)
 		ret = clk_prepare_enable(clk);
 		if (ret == 0) {
 			mcu->clk = clk;
-			mcu->mcu_clk_rate = clk_get_rate(clk);
-		} else {
-			common_warn(dev,
-				    "Single MCU: Failed to enable clock\n");
-			mcu->mcu_clk_rate = 0;
-		}
-	} else {
-		common_warn(dev, "Single MCU: No clock specified\n");
-		mcu->mcu_clk_rate = 0;
-	}
+			mcu->clk_rate = clk_get_rate(clk);
+		} else
+			common_warn(
+				dev,
+				"Single MCU: Failed to enable clock (ret=%d)\n",
+				ret);
 
-	common_dbg(dev, "Single MCU: regs=0x%llx, apb=0x%llx, clk_rate=%lu\n",
-		   (u64)mcu->regs_info->start, mcu->apb_addr,
-		   mcu->mcu_clk_rate);
+	} else
+		common_warn(dev, "Single MCU: No clock specified\n");
+
+	common_dbg(
+		dev,
+		"Single MCU: regs=0x%llx, apb=0x%llx, clk_rate=%lu, I/D offset=0x%llx\n",
+		(u64)mcu->regs_info->start, mcu->apb_addr, mcu->clk_rate,
+		mcu->offset);
 
 	return 0;
 }
@@ -1063,29 +1083,58 @@ static int parse_dt_architecture(struct al_common_dev *dev)
  * DMA BUFFER MANAGEMENT (From original code)
  ******************************************************************************/
 
-static void common_dma_buf_insert(struct al_common_dev *dev,
-				  struct codec_dma_buf *buf)
+static inline void common_dma_buf_insert(struct al_common_dev *dev,
+					 struct al_dma_buf *buf)
 {
-	buf_insert(&dev->dma_lock, &dev->dma_buffers, buf);
+	mutex_lock(&dev->dma_lock);
+	list_add(&buf->list, &dev->dma_buffers);
+	mutex_unlock(&dev->dma_lock);
 }
 
-static void common_dma_buf_remove(struct al_common_dev *dev,
-				  struct codec_dma_buf *buf)
+static inline void common_dma_buf_remove(struct al_common_dev *dev,
+					 struct al_dma_buf *buf)
 {
-	buf_remove(&dev->dma_lock, buf);
+	mutex_lock(&dev->dma_lock);
+	list_del(&buf->list);
+	mutex_unlock(&dev->dma_lock);
 }
 
-static struct codec_dma_buf *common_dma_buf_lookup(struct al_common_dev *dev,
-						   dma_addr_t dma_handle,
-						   bool remove)
+static struct al_dma_buf *common_dma_buf_lookup(struct al_common_dev *dev,
+						dma_addr_t buf_paddr,
+						bool remove)
 {
-	return buf_lookup(&dev->dma_lock, &dev->dma_buffers, dma_handle,
-			  remove);
+	struct al_dma_buf *buf;
+	struct al_dma_buf *res = NULL;
+
+	mutex_lock(&dev->dma_lock);
+	list_for_each_entry(buf, &dev->dma_buffers, list) {
+		if (likely(buf->dma_handle == buf_paddr)) {
+			res = buf;
+			break;
+		}
+	}
+
+	if (res != NULL && remove)
+		list_del(&res->list);
+
+	mutex_unlock(&dev->dma_lock);
+
+	return res;
 }
 
 static void common_dma_buf_cleanup(struct al_common_dev *dev)
 {
-	buf_cleanup_list(&dev->dma_lock, &dev->dma_buffers, &dev->pdev->dev);
+	struct al_dma_buf *buf, *next;
+
+	mutex_lock(&dev->dma_lock);
+
+	list_for_each_entry_safe(buf, next, &dev->dma_buffers, list) {
+		common_dma_free(dev, buf->size, buf->cpu_mem, buf->dma_handle);
+		list_del(&buf->list);
+		kfree(buf);
+	}
+
+	mutex_unlock(&dev->dma_lock);
 }
 
 static void handle_get_cma_req(struct al_mcu_instance *mcu,
@@ -1094,7 +1143,7 @@ static void handle_get_cma_req(struct al_mcu_instance *mcu,
 	struct al_common_dev *dev = mcu->dev;
 	struct msg_itf_get_cma_reply_full reply = { 0 };
 	struct msg_itf_get_cma_req req = { 0 };
-	struct codec_dma_buf *buf = NULL;
+	struct al_dma_buf *buf = NULL;
 	int ret;
 
 	reply.reply.phyAddr = 0;
@@ -1113,8 +1162,8 @@ static void handle_get_cma_req(struct al_mcu_instance *mcu,
 
 	buf->size = req.uSize;
 	buf->is_kernel_mapped = dev->map_in_kernel;
-	buf->cpu_mem = common_dma_alloc_coherent(dev, req.uSize,
-						 &buf->dma_handle, GFP_KERNEL);
+	buf->cpu_mem =
+		common_dma_alloc(dev, req.uSize, &buf->dma_handle, GFP_KERNEL);
 	if (IS_ERR(buf->cpu_mem))
 		goto send_reply;
 
@@ -1146,7 +1195,7 @@ static void handle_put_cma_req(struct al_mcu_instance *mcu,
 	struct al_common_dev *dev = mcu->dev;
 	struct msg_itf_put_cma_reply_full reply = { 0 };
 	struct msg_itf_put_cma_req req = { 0 };
-	struct codec_dma_buf *buf = NULL;
+	struct al_dma_buf *buf = NULL;
 	int ret;
 
 	reply.reply.ret = -1;
@@ -1165,8 +1214,7 @@ static void handle_put_cma_req(struct al_mcu_instance *mcu,
 		goto send_reply;
 	}
 
-	dma_free_coherent(&dev->pdev->dev, buf->size, buf->cpu_mem,
-			  buf->dma_handle);
+	common_dma_free(dev, buf->size, buf->cpu_mem, buf->dma_handle);
 	reply.reply.ret = 0;
 
 send_reply:
@@ -1218,11 +1266,10 @@ static void handle_write_req(struct al_mcu_instance *mcu,
  *
  * Returns: true if messages were processed, false otherwise
  */
-static bool process_mcu_messages(struct al_mcu_instance *mcu)
+static inline void process_mcu_messages(struct al_mcu_instance *mcu)
 {
 	struct al_common_dev *dev = mcu->dev;
 	struct msg_itf_header hdr;
-	bool processed = false;
 
 	/* Check if there are messages in the mailbox */
 	while (codec_msg_get_header(&mcu->mb_m2h, &hdr) == 0) {
@@ -1245,11 +1292,7 @@ static bool process_mcu_messages(struct al_mcu_instance *mcu)
 			if (dev->process_msg_cb)
 				dev->process_msg_cb(dev->cb_arg, &hdr);
 		}
-
-		processed = true;
 	}
-
-	return processed;
 }
 
 /*******************************************************************************
@@ -1286,8 +1329,6 @@ static int common_probe_check_and_setup_hw(struct al_common_dev *dev,
 			      AL_CODEC_IRQ_MCU_2_CPU);
 	}
 
-	dev->regs_info = *res;
-
 	common_info(dev, "Hardware initialized successfully\n");
 	return 0;
 }
@@ -1298,7 +1339,6 @@ static int common_probe_check_and_setup_hw(struct al_common_dev *dev,
  *
  * Returns: 0 on success, negative error code on failure
  */
-
 static int common_setup_dma(struct al_common_dev *common)
 {
 	struct device *dev = &common->pdev->dev;
@@ -1463,7 +1503,6 @@ int al_common_probe(struct platform_device *pdev, struct al_common_dev *dev,
 	common_info(dev, "Probe completed successfully\n");
 	return 0;
 }
-EXPORT_SYMBOL(al_common_probe);
 
 /**
  * al_common_remove - Remove function
@@ -1488,16 +1527,16 @@ int al_common_remove(struct al_common_dev *dev)
 
 		/* Free the firmware memory */
 		if (mcu->fw_cpu_mem)
-			dma_free_coherent(&dev->pdev->dev, mcu->fw_size,
-					  mcu->fw_cpu_mem, mcu->fw_phys_addr);
+			common_dma_free(dev, mcu->fw_size, mcu->fw_cpu_mem,
+					mcu->fw_phys_addr);
 
 		/* Free the inter-comm mb */
 		if (mcu->imb.virt)
-			dma_free_coherent(&dev->pdev->dev, mcu->imb.size,
-					  mcu->imb.virt, mcu->imb.phys);
+			common_dma_free(dev, mcu->imb.size, mcu->imb.virt,
+					mcu->imb.phys);
 
 		/* Disable and put clock */
-		if (!IS_ERR(mcu->clk))
+		if (!IS_ERR(mcu->clk) && mcu->clk_rate)
 			clk_disable_unprepare(mcu->clk);
 
 		/* Cancel all pending work for each MCU */
@@ -1518,7 +1557,6 @@ int al_common_remove(struct al_common_dev *dev)
 	return 0;
 #endif
 }
-EXPORT_SYMBOL(al_common_remove);
 
 /**
  * common_dma_alloc - Allocate DMA memory
@@ -1534,7 +1572,20 @@ void *common_dma_alloc(struct al_common_dev *dev, size_t size,
 {
 	return common_dma_alloc_coherent(dev, size, dma_handle, flag);
 }
-EXPORT_SYMBOL(common_dma_alloc);
+
+/**
+ * common_dma_free - Free the allocate DMA memory
+ * @dev: Device structure
+ * @size: Size of the allocate memory
+ * @cpu_addr: CPU address of the allocated memory
+ * @dma_handle: DMA handle of the allocated memory
+ *
+ */
+void common_dma_free(struct al_common_dev *dev, size_t size, void *cpu_addr,
+		     dma_addr_t dma_handle)
+{
+	return common_dma_free_coherent(dev, size, cpu_addr, dma_handle);
+}
 
 /**
  * al_common_dma_buf_free - Free DMA buffer
@@ -1545,18 +1596,38 @@ EXPORT_SYMBOL(common_dma_alloc);
  */
 int al_common_dma_buf_free(struct al_common_dev *dev, uint64_t phy_addr)
 {
-	struct codec_dma_buf *buf;
+	struct al_dma_buf *buf;
 
 	buf = common_dma_buf_lookup(dev, phy_addr, true);
 	if (!buf)
 		return -EINVAL;
 
-	dma_free_coherent(&dev->pdev->dev, buf->size, buf->cpu_mem,
-			  buf->dma_handle);
+	common_dma_free(dev, buf->size, buf->cpu_mem, buf->dma_handle);
 
 	return 0;
 }
-EXPORT_SYMBOL(al_common_dma_buf_free);
+
+static int al_common_buf_access(struct vm_area_struct *vma, unsigned long addr,
+				void *buf, int len, int write)
+{
+	struct al_dma_buf *buffer = vma->vm_private_data;
+	unsigned long offset = addr - vma->vm_start;
+	unsigned long vm_size = vma->vm_end - vma->vm_start;
+
+	if ((offset + len > vm_size) || !buffer->is_kernel_mapped)
+		return -EINVAL;
+
+	if (write)
+		memcpy(buffer->cpu_mem + offset, buf, len);
+	else
+		memcpy(buf, buffer->cpu_mem + offset, len);
+
+	return len;
+}
+
+static const struct vm_operations_struct al_buf_vm_ops = {
+	.access = al_common_buf_access,
+};
 
 /**
  * al_common_dma_buf_map - Map DMA buffer to userspace
@@ -1567,9 +1638,28 @@ EXPORT_SYMBOL(al_common_dma_buf_free);
  */
 int al_common_dma_buf_map(struct al_common_dev *dev, struct vm_area_struct *vma)
 {
-	return buf_map(&dev->dma_lock, &dev->dma_buffers, vma, &dev->pdev->dev);
+	struct al_dma_buf *buf;
+	size_t vm_size = vma->vm_end - vma->vm_start;
+	int ret;
+
+	buf = common_dma_buf_lookup(dev, PFN_PHYS(vma->vm_pgoff), false);
+	if (!buf)
+		return -EINVAL;
+
+	common_dbg(dev, "buf lookup into driver -> %p", buf);
+
+	vma->vm_pgoff = 0;
+	ret = dma_mmap_coherent(&dev->pdev->dev, vma, buf->cpu_mem,
+				buf->dma_handle, vm_size);
+
+	if (ret < 0)
+		return ret;
+
+	vma->vm_ops = &al_buf_vm_ops;
+	vma->vm_private_data = buf;
+
+	return 0;
 }
-EXPORT_SYMBOL(al_common_dma_buf_map);
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Yassine OUAISSA");

@@ -20,7 +20,6 @@
 #include <linux/uaccess.h>
 #include <linux/version.h>
 
-#include "al_buf.h"
 #include "al_codec_mb.h"
 #include "al_codec_msg.h"
 #include "al_common.h"
@@ -29,8 +28,6 @@
 
 #include "msg_common_itf.h"
 #include "codec_uapi.h"
-
-#define MAX_MISC_NAME 32
 
 #define codec_dbg(dev, fmt, ...) \
 	dev_dbg(&dev->common.pdev->dev, fmt, ##__VA_ARGS__)
@@ -61,67 +58,39 @@ struct codec_event_wrapper {
 	char payload[];
 };
 
-struct codec_dev {
-	struct al_common_dev common;
-
-	struct miscdevice misc;
-	char misc_name[MAX_MISC_NAME];
-	int is_misc_init_done;
-
-	struct mutex client_lock;
-	struct list_head clients;
-};
-
 static bool map_in_kernel = 0;
 module_param(map_in_kernel, bool, S_IRUGO);
 
-static inline void *hdl_2_ptr(uint64_t hdl)
+#define MSG_ITF_TYPE_LIMIT BIT(10)
+
+static inline bool is_type_reply(u16 type)
 {
-	return (void *)(uintptr_t)hdl;
+	return type >= MSG_ITF_TYPE_FIRST_REPLY &&
+	       type < MSG_ITF_TYPE_FIRST_REPLY + MSG_ITF_TYPE_LIMIT;
 }
 
-static inline uint64_t ptr_2_hdl(void *ptr)
+static inline bool is_type_event(u16 type)
 {
-	return (uint64_t)(uintptr_t)ptr;
+	return type >= MSG_ITF_TYPE_FIRST_EVT &&
+	       type < MSG_ITF_TYPE_FIRST_EVT + MSG_ITF_TYPE_LIMIT;
 }
 
-static inline int is_type_reply(uint16_t type)
+static inline struct al_dma_buf *client_dma_buf_lookup(struct codec_client *ctx,
+						       dma_addr_t buf_paddr)
 {
-	if (type < MSG_ITF_TYPE_FIRST_REPLY)
-		return 0;
-	if (type >= MSG_ITF_TYPE_FIRST_REPLY + 1024)
-		return 0;
+	struct al_dma_buf *buf;
+	struct al_dma_buf *res = NULL;
 
-	return 1;
-}
+	mutex_lock(&ctx->dma_lock);
+	list_for_each_entry(buf, &ctx->dma_buffers, list) {
+		if (likely(buf->dma_handle == buf_paddr)) {
+			res = buf;
+			break;
+		}
+	}
+	mutex_unlock(&ctx->dma_lock);
 
-static inline int is_type_event(uint16_t type)
-{
-	if (type < MSG_ITF_TYPE_FIRST_EVT)
-		return 0;
-	if (type >= MSG_ITF_TYPE_FIRST_EVT + 1024)
-		return 0;
-
-	return 1;
-}
-
-void client_dma_buf_insert(struct codec_client *client,
-			   struct codec_dma_buf *buf)
-{
-	buf_insert(&client->dma_lock, &client->dma_buffers, buf);
-}
-
-struct codec_dma_buf *client_dma_buf_lookup(struct codec_client *client,
-					    dma_addr_t dma_handle, bool remove)
-{
-	return buf_lookup(&client->dma_lock, &client->dma_buffers, dma_handle,
-			  remove);
-}
-
-void client_dma_buf_remove(struct codec_client *client,
-			   struct codec_dma_buf *buf)
-{
-	buf_remove(&client->dma_lock, buf);
+	return res;
 }
 
 static int client_create_and_insert(struct codec_dev *dev, struct file *file)
@@ -154,7 +123,7 @@ static int client_create_and_insert(struct codec_dev *dev, struct file *file)
 	return 0;
 }
 
-static void client_cleanup_event_list(struct list_head *events)
+static inline void client_cleanup_event_list(struct list_head *events)
 {
 	struct codec_event_wrapper *next;
 	struct codec_event_wrapper *evt;
@@ -163,6 +132,23 @@ static void client_cleanup_event_list(struct list_head *events)
 		list_del(&evt->list);
 		kfree(evt);
 	}
+}
+
+static inline void client_dma_buf_cleanup(struct codec_client *ctx)
+{
+	struct al_dma_buf *buf, *next;
+	struct codec_dev *dev = ctx->dev;
+
+	mutex_lock(&ctx->dma_lock);
+
+	list_for_each_entry_safe(buf, next, &ctx->dma_buffers, list) {
+		common_dma_free(&dev->common, buf->size, buf->cpu_mem,
+				buf->dma_handle);
+		list_del(&buf->list);
+		kfree(buf);
+	}
+
+	mutex_unlock(&ctx->dma_lock);
 }
 
 static void client_cleanup(struct kref *ref)
@@ -175,8 +161,7 @@ static void client_cleanup(struct kref *ref)
 		codec_err(dev, "cmds list not empty\n");
 
 	client_cleanup_event_list(&client->events);
-	buf_cleanup_list(&client->dma_lock, &client->dma_buffers,
-			 &dev->common.pdev->dev);
+	client_dma_buf_cleanup(client);
 
 	kfree(client);
 }
@@ -184,19 +169,33 @@ static void client_cleanup(struct kref *ref)
 static struct codec_client *client_lookup(struct codec_dev *dev,
 					  struct file *file)
 {
+	struct codec_client *ctx;
 	struct codec_client *res = NULL;
-	struct codec_client *client;
 
 	mutex_lock(&dev->client_lock);
-	list_for_each_entry(client, &dev->clients, list) {
-		if (client->file != file)
-			continue;
-		res = client;
-		break;
+	list_for_each_entry(ctx, &dev->clients, list) {
+		if (likely(ctx->file == file)) {
+			res = ctx;
+			break;
+		}
 	}
 	mutex_unlock(&dev->client_lock);
 
 	return res;
+}
+
+void client_dma_buf_insert(struct codec_client *ctx, struct al_dma_buf *buf)
+{
+	mutex_lock(&ctx->dma_lock);
+	list_add(&buf->list, &ctx->dma_buffers);
+	mutex_unlock(&ctx->dma_lock);
+}
+
+void client_dma_buf_remove(struct codec_client *ctx, struct al_dma_buf *buf)
+{
+	mutex_lock(&ctx->dma_lock);
+	list_del(&buf->list);
+	mutex_unlock(&ctx->dma_lock);
 }
 
 static struct codec_client *client_get(struct codec_dev *dev, uint64_t hdl)
@@ -206,11 +205,11 @@ static struct codec_client *client_get(struct codec_dev *dev, uint64_t hdl)
 
 	mutex_lock(&dev->client_lock);
 	list_for_each_entry(client, &dev->clients, list) {
-		if (client != hdl_2_ptr(hdl))
-			continue;
-		res = client;
-		kref_get(&client->refcount);
-		break;
+		if (client == al_phys_to_virt(hdl)) {
+			res = client;
+			kref_get(&client->refcount);
+			break;
+		}
 	}
 	mutex_unlock(&dev->client_lock);
 
@@ -222,13 +221,14 @@ static void client_put(struct codec_client *client)
 	kref_put(&client->refcount, client_cleanup);
 }
 
-static void client_notify_fw(struct codec_dev *dev, struct codec_client *client)
+static inline void client_notify_fw(struct codec_dev *dev,
+				    struct codec_client *client)
 {
 	struct msg_itf_header hdr;
 	int ret;
 
 	hdr.type = MSG_ITF_TYPE_CLIENT_LEAVE;
-	hdr.driver_client_handle = ptr_2_hdl(client);
+	hdr.driver_client_handle = al_virt_to_phys(client);
 	hdr.driver_command_handle = 0;
 	hdr.payload_len = 0;
 
@@ -288,16 +288,16 @@ cmd_create_and_insert(struct codec_client *client,
 
 static struct codec_cmd *cmd_get(struct codec_client *client, uint64_t hdl)
 {
-	struct codec_cmd *res = NULL;
 	struct codec_cmd *cmd;
+	struct codec_cmd *res = NULL;
 
 	mutex_lock(&client->client_lock);
 	list_for_each_entry(cmd, &client->cmds, list) {
-		if (cmd != hdl_2_ptr(hdl))
-			continue;
-		res = cmd;
-		kref_get(&cmd->refcount);
-		break;
+		if (cmd == al_phys_to_virt(hdl)) {
+			res = cmd;
+			kref_get(&cmd->refcount);
+			break;
+		}
 	}
 	mutex_unlock(&client->client_lock);
 
@@ -353,51 +353,53 @@ static int codec_ioctl_cmd_reply(struct codec_dev *dev, unsigned long arg,
 	if (!client)
 		return -ENODEV;
 
-	ret = copy_from_user(&cmd_reply, ubuf, sizeof(cmd_reply));
-	if (ret)
-		goto error;
+	if (copy_from_user(&cmd_reply, ubuf, sizeof(cmd_reply)))
+		return -EFAULT;
 
-	req = kmalloc(cmd_reply.req_size, GFP_KERNEL);
-	if (!req) {
-		ret = -ENOMEM;
-		goto error;
+	req = kzalloc(cmd_reply.req_size, GFP_KERNEL);
+	if (!req)
+		return -ENOMEM;
+
+	if (copy_from_user(req, cmd_reply.req, cmd_reply.req_size)) {
+		ret = -EFAULT;
+		goto free_req;
 	}
-
-	ret = copy_from_user(req, cmd_reply.req, cmd_reply.req_size);
-	if (ret)
-		goto error;
 
 	cmd = cmd_create_and_insert(client, &cmd_reply);
 	if (!cmd) {
 		ret = -ENOMEM;
-		goto error;
+		goto free_req;
 	}
 
-	req->driver_client_handle = ptr_2_hdl(client);
-	req->driver_command_handle = ptr_2_hdl(cmd);
+	req->driver_client_handle = al_virt_to_phys(client);
+	req->driver_command_handle = al_virt_to_phys(cmd);
 	ret = al_common_send(&dev->common, req);
 	if (ret)
-		goto error;
+		goto remove_cmd;
 
 	ret = wait_for_completion_killable(&cmd->done);
 	if (ret)
-		goto error;
+		goto remove_cmd;
 
-	ret = copy_to_user(cmd_reply.reply, cmd->reply, cmd_reply.reply_size);
+	if (copy_to_user(cmd_reply.reply, cmd->reply, cmd_reply.reply_size)) {
+		ret = -EFAULT;
+		goto remove_cmd;
+	}
 
-error:
-	if (req)
-		kfree(req);
-	if (cmd)
-		cmd_remove(client, cmd);
+	ret = 0;
+
+remove_cmd:
+	cmd_remove(client, cmd);
+free_req:
+	kfree(req);
 
 	return ret;
 }
 
-static struct codec_dma_buf *codec_dma_alloc(struct codec_dev *dev,
-					     struct codec_dma_info *info)
+static struct al_dma_buf *codec_dma_alloc(struct codec_dev *dev,
+					  struct codec_dma_info *info)
 {
-	struct codec_dma_buf *buf;
+	struct al_dma_buf *buf;
 
 	buf = kmalloc(sizeof(*buf), GFP_KERNEL);
 	if (!buf)
@@ -409,13 +411,14 @@ static struct codec_dma_buf *codec_dma_alloc(struct codec_dev *dev,
 	buf->dmabuf_handle = NULL;
 	buf->cpu_mem = common_dma_alloc(&dev->common, info->size,
 					&buf->dma_handle, GFP_KERNEL);
-	info->phy_addr = buf->dma_handle;
-	info->offset = buf->dma_handle;
 
 	if (IS_ERR(buf->cpu_mem)) {
 		kfree(buf);
 		return ERR_PTR(-ENOMEM);
 	}
+
+	info->phy_addr = buf->dma_handle;
+	info->offset = buf->dma_handle;
 
 	return buf;
 }
@@ -425,23 +428,20 @@ static int codec_ioctl_dma_alloc(struct codec_dev *dev, unsigned long arg,
 {
 	void __user *ubuf = (void __user *)arg;
 	struct codec_dma_info info;
-	struct codec_dma_buf *buf;
-	int ret;
+	struct al_dma_buf *buf;
 
-	ret = copy_from_user(&info, ubuf, sizeof(info));
-	if (ret)
-		return ret;
+	if (copy_from_user(&info, ubuf, sizeof(info)))
+		return -EFAULT;
 
 	buf = codec_dma_alloc(dev, &info);
 	if (IS_ERR(buf))
 		return PTR_ERR(buf);
 
-	ret = copy_to_user(ubuf, &info, sizeof(info));
-	if (ret) {
-		dma_free_coherent(&dev->common.pdev->dev, info.size,
-				  buf->cpu_mem, buf->dma_handle);
+	if (copy_to_user(ubuf, &info, sizeof(info))) {
+		common_dma_free(&dev->common, info.size, buf->cpu_mem,
+				buf->dma_handle);
 		kfree(buf);
-		return ret;
+		return -EFAULT;
 	}
 
 	client_dma_buf_insert(client, buf);
@@ -454,13 +454,11 @@ static int codec_ioctl_dma_alloc_w_fd(struct codec_dev *dev, unsigned long arg,
 {
 	void __user *ubuf = (void __user *)arg;
 	struct codec_dma_info info;
-	struct codec_dma_buf *buf;
+	struct al_dma_buf *buf;
 	struct dma_buf *dma_buf;
-	int ret;
 
-	ret = copy_from_user(&info, ubuf, sizeof(info));
-	if (ret)
-		return ret;
+	if (copy_from_user(&info, ubuf, sizeof(info)))
+		return -EFAULT;
 
 	buf = codec_dma_alloc(dev, &info);
 	if (IS_ERR(buf))
@@ -469,17 +467,20 @@ static int codec_ioctl_dma_alloc_w_fd(struct codec_dev *dev, unsigned long arg,
 	dma_buf = codec_dmabuf_wrap(&dev->common.pdev->dev, info.size, buf,
 				    client);
 
-	if (IS_ERR(dma_buf))
+	if (IS_ERR(dma_buf)) {
+		common_dma_free(&dev->common, info.size, buf->cpu_mem,
+				buf->dma_handle);
 		return PTR_ERR(dma_buf);
+	}
 
 	buf->dmabuf_handle = dma_buf;
 	info.fd = dma_buf_fd(dma_buf, O_RDWR);
 
-	ret = copy_to_user(ubuf, &info, sizeof(info));
-	if (ret) {
-		buf_free_dma_coherent(&dev->common.pdev->dev, buf);
+	if (copy_to_user(ubuf, &info, sizeof(info))) {
+		common_dma_free(&dev->common, buf->size, buf->cpu_mem,
+				buf->dma_handle);
 		kfree(buf);
-		return ret;
+		return -EFAULT;
 	}
 
 	client_dma_buf_insert(client, buf);
@@ -492,18 +493,17 @@ static int codec_ioctl_dma_free(struct codec_dev *dev, unsigned long arg,
 {
 	void __user *ubuf = (void __user *)arg;
 	struct codec_dma_info info;
-	struct codec_dma_buf *buf;
-	int ret;
+	struct al_dma_buf *buf;
 
-	ret = copy_from_user(&info, ubuf, sizeof(info));
-	if (ret)
-		return ret;
+	if (copy_from_user(&info, ubuf, sizeof(info)))
+		return -EFAULT;
 
-	buf = client_dma_buf_lookup(client, info.phy_addr, true);
+	buf = client_dma_buf_lookup(client, info.phy_addr);
 	if (!buf)
 		return -EINVAL;
 
-	buf_free_dma_coherent(&dev->common.pdev->dev, buf);
+	common_dma_free(&dev->common, buf->size, buf->cpu_mem, buf->dma_handle);
+	list_del(&buf->list);
 	kfree(buf);
 
 	return 0;
@@ -516,11 +516,9 @@ static int codec_ioctl_dma_free_mcu(struct codec_dev *dev, unsigned long arg)
 {
 	void __user *ubuf = (void __user *)arg;
 	struct codec_dma_info info;
-	int ret;
 
-	ret = copy_from_user(&info, ubuf, sizeof(info));
-	if (ret)
-		return ret;
+	if (copy_from_user(&info, ubuf, sizeof(info)))
+		return -EFAULT;
 
 	return al_common_dma_buf_free(&dev->common, info.phy_addr);
 }
@@ -529,13 +527,11 @@ static int codec_ioctl_fw_info(struct codec_dev *dev, unsigned long arg)
 {
 	void __user *ubuf = (void __user *)arg;
 	struct codec_fw_info info;
-	int ret;
 
 	info.version = dev->common.fw_version;
 
-	ret = copy_to_user(ubuf, &info, sizeof(info));
-	if (ret)
-		return ret;
+	if (copy_to_user(ubuf, &info, sizeof(info)))
+		return -EFAULT;
 
 	return 0;
 }
@@ -548,9 +544,8 @@ static int codec_ioctl_get_event(struct codec_dev *dev, unsigned long arg,
 	struct codec_event_wrapper *evt;
 	int ret;
 
-	ret = copy_from_user(&event, ubuf, sizeof(event));
-	if (ret)
-		return -EINVAL;
+	if (copy_from_user(&event, ubuf, sizeof(event)))
+		return -EFAULT;
 
 	mutex_lock(&client->event_lock);
 	while (list_empty(&client->events)) {
@@ -567,14 +562,12 @@ static int codec_ioctl_get_event(struct codec_dev *dev, unsigned long arg,
 	list_del(&evt->list);
 	mutex_unlock(&client->event_lock);
 
-	ret = copy_to_user(event.event, evt->payload, evt->payload_len);
-	if (ret) {
+	if (copy_to_user(event.event, evt->payload, evt->payload_len)) {
 		kfree(evt);
-		return -EINVAL;
+		return -EFAULT;
 	}
-
 	event.type = evt->type;
-	ret = copy_to_user(ubuf, &event, sizeof(event));
+	ret = (!copy_to_user(ubuf, &event, sizeof(event))) ? 0 : -EFAULT;
 	kfree(evt);
 
 	return ret;
@@ -611,6 +604,7 @@ static int codec_ioctl_get_physical_address(struct codec_dev *dev,
 	info.offset = info.phy_addr;
 
 	dma_buf_unmap_attachment(attach, sgt, DMA_BIDIRECTIONAL);
+
 fail_map:
 	dma_buf_detach(dbuf, attach);
 fail_attach:
@@ -682,16 +676,24 @@ static int codec_mmap(struct file *file, struct vm_area_struct *vma)
 {
 	struct codec_dev *dev =
 		container_of(file->private_data, struct codec_dev, misc);
-	struct codec_client *client = client_lookup(dev, file);
+	struct codec_client *ctx = client_lookup(dev, file);
+	size_t vm_size = vma->vm_end - vma->vm_start;
+	struct al_dma_buf *buf;
 	int ret;
 
-	if (!client)
+	if (!ctx)
 		return -ENODEV;
 
-	ret = buf_map(&client->dma_lock, &client->dma_buffers, vma,
-		      &dev->common.pdev->dev);
+	buf = client_dma_buf_lookup(ctx, PFN_PHYS(vma->vm_pgoff));
+	codec_dbg(dev, "buf lookup into driver -> %p", buf);
+	if (!buf)
+		return -EINVAL;
 
-	if (ret)
+	vma->vm_pgoff = 0;
+	ret = dma_mmap_coherent(&dev->common.pdev->dev, vma, buf->cpu_mem,
+				buf->dma_handle, vm_size);
+
+	if (ret < 0)
 		return al_common_dma_buf_map(&dev->common, vma);
 
 	return 0;
@@ -714,7 +716,8 @@ static void handle_cmd_reply(struct codec_dev *dev, struct msg_itf_header *hdr)
 	client = client_get(dev, hdr->driver_client_handle);
 	if (!client) {
 		codec_dbg(dev, "Unable to find client %p for reply %d\n",
-			  hdl_2_ptr(hdr->driver_client_handle), hdr->type);
+			  al_phys_to_virt(hdr->driver_client_handle),
+			  hdr->type);
 		goto error;
 	}
 
@@ -762,7 +765,7 @@ static void handle_evt(struct codec_dev *dev, struct msg_itf_header *hdr,
 	client = client_get(dev, hdr->driver_client_handle);
 	if (!client) {
 		codec_dbg(dev, "Unable to find client %p for evt %d\n",
-			  hdl_2_ptr(hdr->driver_client_handle), type);
+			  al_phys_to_virt(hdr->driver_client_handle), type);
 		goto error;
 	}
 
@@ -826,7 +829,7 @@ static void codec_fw_ready(void *cb_arg)
 	struct miscdevice *misc;
 	int ret;
 
-	data = (struct al_riscv_match_data *)device_get_match_data(device);
+	data = (struct al_riscv_match_data *)of_device_get_match_data(device);
 	if (!data) {
 		codec_err(dev, "Unable to find device data\n");
 		return;
@@ -854,7 +857,8 @@ int codec_probe(struct platform_device *pdev)
 
 	dev_info(&pdev->dev, "Probing ...\n");
 
-	data = (struct al_riscv_match_data *)device_get_match_data(&pdev->dev);
+	data = (struct al_riscv_match_data *)of_device_get_match_data(
+		&pdev->dev);
 	if (!data) {
 		dev_err(&pdev->dev, "Unable to find device data\n");
 		return -EINVAL;

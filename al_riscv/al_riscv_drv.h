@@ -9,13 +9,27 @@
 
 #include <linux/dma-mapping.h>
 #include <linux/platform_device.h>
+#include <linux/miscdevice.h>
 #include <linux/version.h>
 
-#include "al_buf.h"
+#include "al_common.h"
+
+#define MAX_MISC_NAME 32
 
 struct al_riscv_match_data {
 	const char *fw_name;
 	const char *default_device_name;
+};
+
+struct codec_dev {
+	struct al_common_dev common;
+
+	struct miscdevice misc;
+	char misc_name[MAX_MISC_NAME];
+	int is_misc_init_done;
+
+	struct mutex client_lock;
+	struct list_head clients;
 };
 
 struct codec_client {
@@ -36,14 +50,9 @@ struct codec_client {
 	struct list_head dma_buffers;
 };
 
-void client_dma_buf_insert(struct codec_client *client,
-			   struct codec_dma_buf *buf);
+void client_dma_buf_insert(struct codec_client *ctx, struct al_dma_buf *buf);
 
-struct codec_dma_buf *client_dma_buf_lookup(struct codec_client *client,
-					    dma_addr_t dma_handle, bool remove);
-
-void client_dma_buf_remove(struct codec_client *client,
-			   struct codec_dma_buf *buf);
+void client_dma_buf_remove(struct codec_client *ctx, struct al_dma_buf *buf);
 
 int codec_probe(struct platform_device *pdev);
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 11, 0)

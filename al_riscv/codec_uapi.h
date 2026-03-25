@@ -8,6 +8,7 @@
 #define __CODEC_UAPI__ 1
 
 #include <linux/types.h>
+#include <linux/ioctl.h>
 
 struct codec_cmd_reply {
 	uint16_t req_size;

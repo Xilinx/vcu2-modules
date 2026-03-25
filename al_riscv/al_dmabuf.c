@@ -9,6 +9,7 @@
 #include <linux/version.h>
 
 #include "al_dmabuf.h"
+#include "al_riscv_drv.h"
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 13, 0)
 MODULE_IMPORT_NS("DMA_BUF");
@@ -17,7 +18,7 @@ MODULE_IMPORT_NS(DMA_BUF);
 #endif
 
 struct codec_dma_buf_priv {
-	struct codec_dma_buf *buffer;
+	struct al_dma_buf *buffer;
 	struct codec_client *client;
 	/* DMABUF related */
 	struct device *dev;
@@ -154,7 +155,7 @@ static int codec_dmabuf_mmap(struct dma_buf *dbuf, struct vm_area_struct *vma)
 	struct codec_dma_buf_priv *dinfo = dbuf->priv;
 	unsigned long start = vma->vm_start;
 	unsigned long vsize = vma->vm_end - start;
-	struct codec_dma_buf *buffer = dinfo->buffer;
+	struct al_dma_buf *buffer = dinfo->buffer;
 	int ret;
 
 	if (!dinfo) {
@@ -184,7 +185,8 @@ static int codec_dmabuf_mmap(struct dma_buf *dbuf, struct vm_area_struct *vma)
 static void codec_dmabuf_release(struct dma_buf *dbuf)
 {
 	struct codec_dma_buf_priv *dinfo = dbuf->priv;
-	struct codec_dma_buf *buffer = dinfo->buffer;
+	struct al_dma_buf *buffer = dinfo->buffer;
+	struct codec_dev *dev = dinfo->client->dev;
 
 	if (dinfo->sgt) {
 		sg_free_table(dinfo->sgt);
@@ -193,7 +195,8 @@ static void codec_dmabuf_release(struct dma_buf *dbuf)
 
 	client_dma_buf_remove(dinfo->client, buffer);
 
-	buf_free_dma_coherent(dinfo->dev, buffer);
+	common_dma_free(&dev->common, buffer->size, buffer->cpu_mem,
+			buffer->dma_handle);
 
 	put_device(dinfo->dev);
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 9, 0)
@@ -278,7 +281,7 @@ static void define_export_info(struct dma_buf_export_info *exp_info,
 static inline struct sg_table *
 codec_create_sgt(struct codec_dma_buf_priv *dinfo)
 {
-	struct codec_dma_buf *buf = dinfo->buffer;
+	struct al_dma_buf *buf = dinfo->buffer;
 	struct device *dev = dinfo->dev;
 	struct sg_table *sgt;
 	int err;
@@ -304,7 +307,7 @@ free_sgt:
 }
 
 struct dma_buf *codec_dmabuf_wrap(struct device *dev, size_t size,
-				  struct codec_dma_buf *buffer,
+				  struct al_dma_buf *buffer,
 				  struct codec_client *client)
 {
 	struct dma_buf *dma_buf;

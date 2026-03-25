@@ -7,17 +7,33 @@
 #ifndef __AL_CODEC__
 #define __AL_CODEC__ 1
 
+#include <linux/dma-mapping.h>
+#include <linux/clk.h>
 #include <linux/types.h>
 #include <linux/platform_device.h>
 #include <linux/completion.h>
 #include <linux/list.h>
 #include <linux/mutex.h>
-#include <linux/clk.h>
+
 #include "al_codec_mb.h"
 #include "msg_common_itf.h"
 
 /* Maximum number of MCUs supported */
 #define AL_MAX_MCUS 8
+
+/* Address translation */
+#define al_phys_to_virt(x) ((void *)(uintptr_t)x)
+#define al_virt_to_phys(x) ((phys_addr_t)(uintptr_t)x)
+
+struct al_dma_buf {
+	void *cpu_mem;
+	dma_addr_t dma_handle;
+	size_t size;
+	int is_kernel_mapped;
+	bool is_coherent;
+	struct list_head list;
+	struct dma_buf *dmabuf_handle;
+};
 
 struct al_dma_mem {
 	dma_addr_t phys; /* Memory physical address */
@@ -66,7 +82,7 @@ struct al_mcu_instance {
 	bool is_master; /* First MCU is always the master */
 	struct completion done;
 	struct clk *clk; /* Clock for this MCU */
-	unsigned long mcu_clk_rate; /* Clock rate from device tree or firmware */
+	unsigned long clk_rate; /* Clock rate from device tree or firmware */
 	struct work_struct irq_work;
 
 	/* Firmware memory for this MCU */
@@ -104,6 +120,9 @@ int al_common_send(struct al_common_dev *dev, struct msg_itf_header *hdr);
 /* DMA buffer management */
 void *common_dma_alloc(struct al_common_dev *dev, size_t size,
 		       dma_addr_t *dma_handle, gfp_t flag);
+void common_dma_free(struct al_common_dev *dev, size_t size, void *cpu_addr,
+		     dma_addr_t dma_handle);
+
 int al_common_dma_buf_free(struct al_common_dev *dev, uint64_t phy_addr);
 int al_common_dma_buf_map(struct al_common_dev *dev,
 			  struct vm_area_struct *vma);
