@@ -28,11 +28,10 @@ MODULE_IMPORT_NS(DMA_BUF);
 
 struct codec_dma_buf_priv {
 	struct codec_dma_buf *buffer;
-	
 	struct codec_client *client;
 	/* DMABUF related */
 	struct device *dev;
-	struct sg_table *sgt_base;
+	struct sg_table *sgt;
 	enum dma_data_direction dma_dir;
 
 };
@@ -65,13 +64,13 @@ static int codec_dmabuf_attach(struct dma_buf *dbuf, struct device *dev,
 
 	sgt = &attach->sgt;
 
-	ret = sg_alloc_table(sgt, dinfo->sgt_base->orig_nents, GFP_KERNEL);
+	ret = sg_alloc_table(sgt, dinfo->sgt->orig_nents, GFP_KERNEL);
 	if (ret) {
 		kfree(attach);
 		return -ENOMEM;
 	}
 
-	rd = dinfo->sgt_base->sgl;
+	rd = dinfo->sgt->sgl;
 	wr = sgt->sgl;
 
 	for (i = 0; i < sgt->orig_nents; ++i) {
@@ -200,9 +199,10 @@ static void codec_dmabuf_release(struct dma_buf *dbuf)
 	struct codec_dma_buf_priv *dinfo = dbuf->priv;
 	struct codec_dma_buf *buffer = dinfo->buffer;
 
-	if (dinfo->sgt_base) {
-		sg_free_table(dinfo->sgt_base);
-		kfree(dinfo->sgt_base);
+	if (dinfo->sgt) {
+    dma_unmap_sgtable(dinfo->dev, dinfo->sgt, dinfo->dma_dir, 0);
+		sg_free_table(dinfo->sgt);
+		kfree(dinfo->sgt);
 	}
 
 	client_dma_buf_remove(dinfo->client, buffer);
@@ -279,7 +279,6 @@ static const struct dma_buf_ops codec_dma_buf_ops = {
 	.release	= codec_dmabuf_release,
 };
 
-
 static void define_export_info(struct dma_buf_export_info *exp_info,
 			       size_t size,
 			       void *priv)
@@ -293,28 +292,36 @@ static void define_export_info(struct dma_buf_export_info *exp_info,
 	exp_info->priv = priv;
 }
 
-static struct sg_table *codec_get_base_sgt(struct codec_dma_buf_priv *dinfo)
+static inline struct sg_table *codec_create_sgt(struct codec_dma_buf_priv *dinfo)
 {
-	int ret;
-	struct sg_table *sgt;
+	enum dma_data_direction direction = dinfo->dma_dir;
 	struct codec_dma_buf *buf = dinfo->buffer;
 	struct device *dev = dinfo->dev;
+	struct sg_table *sgt;
+	int err;
 
 	sgt = kzalloc(sizeof(*sgt), GFP_KERNEL);
 	if (!sgt)
-		return NULL;
+    return ERR_PTR(-ENOMEM);
 
 	// We can do that only because we use the incoherent DMA API ?
 	// See kernel-doc comment of `dma_get_sgtable()`
-	ret = dma_get_sgtable(dev, sgt, buf->cpu_mem, buf->dma_handle,
+	err = dma_get_sgtable(dev, sgt, buf->cpu_mem, buf->dma_handle,
 			      buf->size);
-	if (ret < 0) {
-		kfree(sgt);
-		return NULL;
-	}
+	if (err)
+	  goto free_sgt;
+
+	err = dma_map_sgtable(dev, sgt, direction, 0);
+	if (err)
+		goto free_sgt;
 
 	return sgt;
 
+free_sgt:
+  sg_free_table(sgt);
+  kfree(sgt);
+
+  return ERR_PTR(err);
 }
 
 struct dma_buf *codec_dmabuf_wrap(struct device *dev, size_t size,
@@ -322,11 +329,12 @@ struct dma_buf *codec_dmabuf_wrap(struct device *dev, size_t size,
 								struct codec_client *client)
 {
 	struct dma_buf *dma_buf;
-
-
 	struct codec_dma_buf_priv *dinfo;
 
 	DEFINE_DMA_BUF_EXPORT_INFO(exp_info);
+
+	if(IS_ERR(buffer) || IS_ERR(client))
+		return ERR_PTR(-ENOMEM);
 
 	dinfo = kzalloc(sizeof(*dinfo), GFP_KERNEL);
 	if (!dinfo)
@@ -336,25 +344,29 @@ struct dma_buf *codec_dmabuf_wrap(struct device *dev, size_t size,
 	dinfo->client = client;
 	dinfo->buffer = buffer;
 	dinfo->dma_dir = DMA_BIDIRECTIONAL;
-	dinfo->sgt_base = codec_get_base_sgt(dinfo);
-
+	dinfo->sgt = codec_create_sgt(dinfo);
 
 	define_export_info(&exp_info,
 			   buffer->size,
 			   (void *)dinfo);
 
-	if (!dinfo->sgt_base)
-		dinfo->sgt_base = codec_get_base_sgt(dinfo);
+	if (IS_ERR(dinfo->sgt))
+		dinfo->sgt = codec_create_sgt(dinfo);
 
-	if (WARN_ON(!dinfo->sgt_base))
-		return NULL;
-
+	if (IS_ERR(dinfo->sgt)) {
+	  pr_err("Failed to create the sg table\n");
+		goto free_sgt;
+	}
 
 	dma_buf = dma_buf_export(&exp_info);
 	if (IS_ERR(dma_buf)) {
 		pr_err("couldn't export dma buf\n");
-		return ERR_PTR(-EINVAL);
+		goto free_sgt;
 	}
 
 	return dma_buf;
+
+free_sgt:
+	kfree(dinfo);
+	return ERR_PTR(-EINVAL);
 }

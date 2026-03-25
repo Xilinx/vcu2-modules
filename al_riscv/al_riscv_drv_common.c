@@ -439,6 +439,8 @@ static int codec_ioctl_dma_alloc(struct codec_dev *dev, unsigned long arg,
 		return ret;
 
 	buf = codec_dma_alloc(dev, &info);
+	if(IS_ERR(buf))
+		return PTR_ERR(buf);
 
 	ret = copy_to_user(ubuf, &info, sizeof(info));
 	if (ret) {
@@ -468,6 +470,8 @@ static int codec_ioctl_dma_alloc_w_fd(struct codec_dev *dev, unsigned long arg,
 		return ret;
 
 	buf = codec_dma_alloc(dev, &info);
+	if(IS_ERR(buf))
+		return PTR_ERR(buf);
 
 	dma_buf = codec_dmabuf_wrap(&dev->common.pdev->dev, info.size, buf, client);
 
