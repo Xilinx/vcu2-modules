@@ -1,6 +1,6 @@
 /******************************************************************************
 *
-* Copyright (C) 2019 Allegro DVT2.  All rights reserved.
+* Copyright (C) 2026 Allegro DVT.  All rights reserved.
 *
 ******************************************************************************/
 
@@ -821,12 +821,12 @@ static void codec_fw_ready(void *cb_arg)
 {
 	struct codec_dev *dev = cb_arg;
 	struct device *device = &dev->common.pdev->dev;
-	struct device_data *data;
+	struct al_riscv_match_data *data;
 	const char *device_name;
 	struct miscdevice *misc;
 	int ret;
 
-	data = (struct device_data *)of_device_get_match_data(device);
+	data = (struct al_riscv_match_data *)device_get_match_data(device);
 	if (!data) {
 		codec_err(dev, "Unable to find device data\n");
 		return;
@@ -846,15 +846,15 @@ static void codec_fw_ready(void *cb_arg)
 		dev->is_misc_init_done = 1;
 }
 
-static int codec_probe(struct platform_device *pdev)
+int codec_probe(struct platform_device *pdev)
 {
-	struct device_data *data;
+	struct al_riscv_match_data *data;
 	struct codec_dev *dev;
 	int ret;
 
 	dev_info(&pdev->dev, "Probing ...\n");
 
-	data = (struct device_data *)of_device_get_match_data(&pdev->dev);
+	data = (struct al_riscv_match_data *)device_get_match_data(&pdev->dev);
 	if (!data) {
 		dev_err(&pdev->dev, "Unable to find device data\n");
 		return -EINVAL;
@@ -880,9 +880,9 @@ static int codec_probe(struct platform_device *pdev)
 }
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 11, 0)
-static void codec_remove(struct platform_device *pdev)
+void codec_remove(struct platform_device *pdev)
 #else
-static int codec_remove(struct platform_device *pdev)
+int codec_remove(struct platform_device *pdev)
 #endif
 {
 	struct codec_dev *dev = platform_get_drvdata(pdev);
@@ -897,36 +897,3 @@ static int codec_remove(struct platform_device *pdev)
 	return al_common_remove(&dev->common);
 #endif
 }
-
-static const struct device_data ale2xx_data = {
-	.fw_name = "ale2xx.fw",
-	.default_device_name = "al_e2xx",
-};
-
-static const struct device_data ald3xx_data = {
-	.fw_name = "ald3xx.fw",
-	.default_device_name = "al_d3xx",
-};
-
-static const struct of_device_id al_codec_dt_match[] = {
-	{ .compatible = "al,ale2xx", .data = &ale2xx_data },
-	{ .compatible = "al,ald3xx", .data = &ald3xx_data },
-	{}
-};
-MODULE_DEVICE_TABLE(of, al_codec_dt_match);
-
-static struct platform_driver al_codec_driver = {
-	.driver			= {
-		.name		= "al_codec",
-		.of_match_table = of_match_ptr(al_codec_dt_match),
-	},
-	.probe			= codec_probe,
-	.remove			= codec_remove,
-};
-
-module_platform_driver(al_codec_driver);
-
-MODULE_LICENSE("GPL");
-MODULE_ALIAS("platform:al_codec");
-MODULE_AUTHOR("Mickael Guene <mickael.guene@allegrodvt.com>");
-MODULE_DESCRIPTION("Allegro DVT codec driver");

@@ -1,6 +1,6 @@
 /******************************************************************************
 *
-* Copyright (C) 2019 Allegro DVT2.  All rights reserved.
+* Copyright (C) 2026 Allegro DVT.  All rights reserved.
 *
 ******************************************************************************/
 
@@ -8,6 +8,15 @@
 #define __AL_RISCV_DRV__
 
 #include <linux/dma-mapping.h>
+#include <linux/platform_device.h>
+#include <linux/version.h>
+
+#include "al_buf.h"
+
+struct al_riscv_match_data {
+	const char *fw_name;
+	const char *default_device_name;
+};
 
 struct codec_client {
 	struct kref refcount;
@@ -35,5 +44,12 @@ struct codec_dma_buf *client_dma_buf_lookup(struct codec_client *client,
 
 void client_dma_buf_remove(struct codec_client *client,
 			   struct codec_dma_buf *buf);
+
+int codec_probe(struct platform_device *pdev);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 11, 0)
+void codec_remove(struct platform_device *pdev);
+#else
+int codec_remove(struct platform_device *pdev);
+#endif
 
 #endif
