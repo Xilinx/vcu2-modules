@@ -687,7 +687,7 @@ static int codec_mmap(struct file *file, struct vm_area_struct *vma)
 	buf = client_dma_buf_lookup(ctx, PFN_PHYS(vma->vm_pgoff));
 	codec_dbg(dev, "buf lookup into driver -> %p", buf);
 	if (!buf)
-		return -EINVAL;
+		return al_common_dma_buf_map(&dev->common, vma);
 
 	vma->vm_pgoff = 0;
 	ret = dma_mmap_coherent(&dev->common.pdev->dev, vma, buf->cpu_mem,
