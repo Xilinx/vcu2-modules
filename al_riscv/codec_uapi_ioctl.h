@@ -4,34 +4,12 @@
 *
 ******************************************************************************/
 
-#ifndef __CODEC_UAPI__
-#define __CODEC_UAPI__ 1
+#ifndef __CODEC_UAPI_IOCTL__
+#define __CODEC_UAPI_IOCTL__ 1
 
 #include <linux/types.h>
 #include <linux/ioctl.h>
-
-struct codec_cmd_reply {
-	uint16_t req_size;
-	uint16_t reply_size;
-	void *req;
-	void *reply;
-};
-
-struct codec_dma_info {
-	uint64_t phy_addr;
-	uint64_t offset;
-	uint32_t size;
-	int32_t fd;
-};
-
-struct codec_event {
-	uint32_t type;
-	void *event;
-};
-
-struct codec_fw_info {
-	uint32_t version;
-};
+#include "codec_uapi_struct.h"
 
 #define CODEC_FW_CMD_REPLY _IOWR('c', 1, struct codec_cmd_reply)
 #define CODEC_DMA_ALLOC _IOWR('c', 2, struct codec_dma_info)
@@ -44,4 +22,4 @@ struct codec_fw_info {
 /* FW Information */
 #define CODEC_GET_FW_INFO _IOR('c', 8, struct codec_fw_info)
 
-#endif /* __CODEC_UAPI__ */
+#endif /* __CODEC_UAPI_IOCTL__ */

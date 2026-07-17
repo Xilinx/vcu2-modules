@@ -193,10 +193,13 @@ static void codec_dmabuf_release(struct dma_buf *dbuf)
 		kfree(dinfo->sgt);
 	}
 
-	client_dma_buf_remove(dinfo->client, buffer);
-
+	// only free DMA resources
 	common_dma_free(&dev->common, buffer->size, buffer->cpu_mem,
 			buffer->dma_handle);
+
+	/* NOW remove from client list (ONLY place) */
+	client_dma_buf_remove(dinfo->client, buffer);
+	codec_client_put(dinfo->client);
 
 	put_device(dinfo->dev);
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 9, 0)
@@ -323,6 +326,8 @@ struct dma_buf *codec_dmabuf_wrap(struct device *dev, size_t size,
 		return ERR_PTR(-ENOMEM);
 
 	dinfo->dev = get_device(dev);
+
+	codec_client_get(client);
 	dinfo->client = client;
 	dinfo->buffer = buffer;
 	dinfo->dma_dir = DMA_BIDIRECTIONAL;
@@ -347,6 +352,19 @@ struct dma_buf *codec_dmabuf_wrap(struct device *dev, size_t size,
 	return dma_buf;
 
 free_sgt:
+	if (dinfo->sgt) {
+		sg_free_table(dinfo->sgt);
+		kfree(dinfo->sgt);
+	}
+
+	if (dinfo->dev) {
+		put_device(dinfo->dev);
+	}
+
+	if (dinfo->client) {
+		codec_client_put(dinfo->client);
+	}
+
 	kfree(dinfo);
 	return ERR_PTR(-EINVAL);
 }

@@ -27,7 +27,7 @@
 #include "al_riscv_drv.h"
 
 #include "msg_common_itf.h"
-#include "codec_uapi.h"
+#include "codec_uapi_ioctl.h"
 
 #define codec_dbg(dev, fmt, ...) \
 	dev_dbg(&dev->common.pdev->dev, fmt, ##__VA_ARGS__)
@@ -142,9 +142,9 @@ static inline void client_dma_buf_cleanup(struct codec_client *ctx)
 	mutex_lock(&ctx->dma_lock);
 
 	list_for_each_entry_safe(buf, next, &ctx->dma_buffers, list) {
+		list_del(&buf->list);
 		common_dma_free(&dev->common, buf->size, buf->cpu_mem,
 				buf->dma_handle);
-		list_del(&buf->list);
 		kfree(buf);
 	}
 
@@ -182,6 +182,16 @@ static struct codec_client *client_lookup(struct codec_dev *dev,
 	mutex_unlock(&dev->client_lock);
 
 	return res;
+}
+
+void codec_client_get(struct codec_client *client)
+{
+	kref_get(&client->refcount);
+}
+
+void codec_client_put(struct codec_client *client)
+{
+	kref_put(&client->refcount, client_cleanup);
 }
 
 void client_dma_buf_insert(struct codec_client *ctx, struct al_dma_buf *buf)

@@ -54,6 +54,10 @@ void client_dma_buf_insert(struct codec_client *ctx, struct al_dma_buf *buf);
 
 void client_dma_buf_remove(struct codec_client *ctx, struct al_dma_buf *buf);
 
+void codec_client_get(struct codec_client *client);
+
+void codec_client_put(struct codec_client *client);
+
 int codec_probe(struct platform_device *pdev);
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 11, 0)
 void codec_remove(struct platform_device *pdev);

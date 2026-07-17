@@ -25,17 +25,26 @@
 /* Version format is 12.12.8 for major.minor.patch */
 #define AL_BOOT_VERSION(major, minor, patch) \
 	(((major) << 20) | ((minor) << 12) | ((patch) << 0))
+#define AL_BOOT_MAJOR(version) ((version & 0xfff00000) >> 20)
+#define AL_BOOT_MINOR(version) ((version & 0x000ff000) >> 12)
+#define AL_BOOT_PATCH(version) ((version & 0x00000fff))
 
 /* IP Registers */
 #define AL_CODEC_UID 0x0000
 #define AL_CODEC_UID_ID 0x30AB6E51
+
+/* Writing 1 in this register set the IP in reset mode */
 #define AL_CODEC_RESET 0x0010
+
 #define AL_CODEC_IRQ_MASK 0x0014
 #define AL_CODEC_IRQ_STATUS_CLEAR 0x0018
 
 /* MCU Registers (relative to MCU base) */
+/* Writing 1 in this register enables the MCU gated clock */
 #define AL_CODEC_MCU_CLK 0x0400
+/* Writing 1 in this register set the MCU in reset mode */
 #define AL_CODEC_MCU_RST 0x0404
+/* Writing 1 in this register trigger the MCU interrupt */
 #define AL_CODEC_MCU_IRQ 0x040C
 #define AL_CODEC_MCU_BOOT_ADDR_MSB 0x0410
 #define AL_CODEC_MCU_BOOT_ADDR_LSB 0x0414
@@ -49,19 +58,18 @@
 #define AL_CODEC_DATA_OFFSET_MSB 0x0458
 #define AL_CODEC_DATA_OFFSET_LSB 0x045C
 #define AL_CODEC_MCU_BOOT_TIMEOUT_RATIO (15000000000)
+#define AL_CODEC_MCU_USER_BOOT_TIMEOUT_VALUE_IN_MS (20000)
 #define MCU_VIRTUAL_SIZE (256ULL * 1024 * 1024 * 1024) /* 256GB */
 
 /* Register configuration */
 #define AL_CODEC_IRQ_MCU_2_CPU BIT(30)
-#define AL_CODEC_REG_ENABLE BIT(0)
-#define AL_CODEC_REG_DISABLE 0
+#define AL_CODEC_REG_CLEAR 0
 
 /* Machine IDs */
 #define MACHINE_ID_1 1
 #define MACHINE_ID_2 2
-#define MACHINE_ID_2_IP_OFFSET 0x06000000
-#define MACHINE_ID_2_APB_MASK 0x07ffffff
-#define MACHINE_ID_2_ALIGN 0x04000000
+#define MACHINE_ID_2_IP_OFFSET GENMASK(26, 25)
+#define MACHINE_ID_2_ALIGN GENMASK(26, 0)
 
 /* Mailbox interface */
 #define MAILBOX_IFT_VERSION 0x00010000
@@ -103,28 +111,74 @@ struct imb_boot {
 	uint32_t reserved;
 } __packed;
 
-/* Boot header structure in firmware */
-struct boot_header {
-	/* Info used by driver */
+union boot_header;
+
+struct boot_header_vtable {
+	uint32_t (*get_boot_header_fw_version)(const union boot_header *bh);
+	char *(*get_boot_header_model)(const union boot_header *bh);
+	uint64_t (*get_boot_header_vaddr_start)(const union boot_header *bh);
+	uint64_t (*get_boot_header_vaddr_end)(const union boot_header *bh);
+	uint64_t (*get_boot_header_boot_addr)(const union boot_header *bh);
+	struct mb_header (*get_boot_header_h2m)(const union boot_header *bh);
+	struct mb_header (*get_boot_header_m2h)(const union boot_header *bh);
+	uint64_t (*get_boot_header_machine_id)(const union boot_header *bh);
+	uint64_t (*get_boot_header_ip_start)(const union boot_header *bh);
+	uint64_t (*get_boot_header_ip_end)(const union boot_header *bh);
+	uint64_t (*get_boot_header_mcu_clk_rate)(const union boot_header *bh);
+	uint32_t (*get_boot_header_mb_version)(const union boot_header *bh);
+	uint8_t (*get_boot_header_mcu_id)(const union boot_header *bh);
+	struct imb_boot *(*get_boot_header_imb_info)(
+		const union boot_header *bh);
+	void (*set_boot_header_mcu_id)(const union boot_header *bh,
+				       uint8_t mcu_id);
+	void (*set_boot_header_ip_start)(const union boot_header *bh,
+					 uint64_t ip_start);
+	void (*set_boot_header_ip_end)(const union boot_header *bh,
+				       uint64_t ip_end);
+	void (*set_boot_header_mcu_clk_rate)(const union boot_header *bh,
+					     uint64_t mcu_clk_rate);
+	uint32_t (*get_boot_header_size)(void);
+};
+
+#ifdef BOOT_HEADER_COMPATIBILITY
+#include "al_boot_header_v2_0_0.h"
+#include "al_boot_header_v2_1_0.h"
+#endif
+#include "al_boot_header_v2_2_0.h"
+
+union boot_header {
 	uint32_t bh_version;
-	uint32_t fw_version;
-	char model[16];
-	uint64_t vaddr_start;
-	uint64_t vaddr_end;
-	uint64_t boot_addr;
-	struct mb_header h2m;
-	struct mb_header m2h;
-	uint64_t machine_id;
-
-	/* Filled by driver before fw boot */
-	uint64_t ip_start;
-	uint64_t ip_end;
-	uint64_t mcu_clk_rate;
-
-	uint32_t mb_version;
-	uint8_t mcu_id;
-	struct imb_boot imb_info;
+#ifdef BOOT_HEADER_COMPATIBILITY
+	struct tBootHeader_v2_0_0 v2_0_0;
+	struct tBootHeader_v2_1_0 v2_1_0;
+#endif
+	struct tBootHeader_v2_2_0 v2_2_0;
 } __packed;
+
+static inline uint32_t get_boot_header_bh_version(const union boot_header *bh)
+{
+	return bh->bh_version;
+}
+
+static inline void set_boot_header_version(struct boot_header_vtable *vbh,
+					   const union boot_header *bh)
+{
+	uint32_t version = get_boot_header_bh_version(bh);
+	switch (version) {
+#ifdef BOOT_HEADER_COMPATIBILITY
+	case AL_BOOT_VERSION(2, 0, 0):
+		set_v2_0_0_boot_header(vbh);
+		break;
+	case AL_BOOT_VERSION(2, 1, 0):
+		set_v2_1_0_boot_header(vbh);
+		break;
+#endif
+	case AL_BOOT_VERSION(2, 2, 0):
+	default:
+		set_v2_2_0_boot_header(vbh);
+		break;
+	}
+}
 
 /*******************************************************************************
  * HELPER FUNCTIONS
@@ -155,13 +209,19 @@ static inline u64 get_mcu_offset(u64 reserved_mem_start, u64 reserved_mem_size)
 
 static inline u64 get_machine_boot_addr(struct al_common_dev *dev,
 					struct al_mcu_instance *mcu,
-					const struct boot_header *bh)
+					const union boot_header *bh)
 {
-	if (bh->machine_id == MACHINE_ID_1)
-		return bh->boot_addr;
+	struct boot_header_vtable vbh;
+	u64 boot_addr;
+	set_boot_header_version(&vbh, bh);
 
-	u64 boot_addr = mcu->fw_phys_addr - mcu->offset;
-	return ((bh->boot_addr - bh->vaddr_start) + boot_addr);
+	if (vbh.get_boot_header_machine_id(bh) == MACHINE_ID_1)
+		return vbh.get_boot_header_boot_addr(bh);
+
+	boot_addr = mcu->fw_phys_addr - mcu->offset;
+	return ((vbh.get_boot_header_boot_addr(bh) -
+		 vbh.get_boot_header_vaddr_start(bh)) +
+		boot_addr);
 }
 
 /* Get the boot timeout using the clock rate (in msecs ) */
@@ -197,7 +257,7 @@ static inline void dev_writel(struct al_common_dev *dev, u32 offset, u32 val)
 static void common_trigger_mcu_irq(void *arg)
 {
 	struct al_mcu_instance *mcu = arg;
-	common_writel(mcu, AL_CODEC_MCU_IRQ, AL_CODEC_REG_ENABLE);
+	common_writel(mcu, AL_CODEC_MCU_IRQ, BIT(0));
 }
 
 /**
@@ -296,15 +356,13 @@ static void common_dma_free_coherent(struct al_common_dev *dev, size_t size,
 static void common_reset_mcu(struct al_mcu_instance *mcu)
 {
 	/* Reset the IP */
-	common_writel(mcu, AL_CODEC_RESET, AL_CODEC_REG_ENABLE);
+	common_writel(mcu, AL_CODEC_RESET, BIT(0));
+	common_writel(mcu, AL_CODEC_MCU_RST, BIT(0));
 
-	common_writel(mcu, AL_CODEC_MCU_RST, AL_CODEC_REG_ENABLE);
-	common_writel(mcu, AL_CODEC_MCU_CLK, AL_CODEC_REG_DISABLE);
-	common_writel(mcu, AL_CODEC_MCU_IRQ, AL_CODEC_REG_DISABLE);
-	common_writel(mcu, AL_CODEC_MCU_IP_INTERRUPT_MASK,
-		      AL_CODEC_REG_DISABLE);
-	msleep(10);
-	common_writel(mcu, AL_CODEC_MCU_RST, AL_CODEC_REG_DISABLE);
+	common_writel(mcu, AL_CODEC_MCU_CLK, AL_CODEC_REG_CLEAR);
+	common_writel(mcu, AL_CODEC_MCU_IRQ, AL_CODEC_REG_CLEAR);
+	common_writel(mcu, AL_CODEC_MCU_IP_INTERRUPT_MASK, AL_CODEC_REG_CLEAR);
+	common_writel(mcu, AL_CODEC_MCU_RST, AL_CODEC_REG_CLEAR);
 }
 
 /* Reset device and all MCUs */
@@ -333,46 +391,75 @@ static inline void common_reset(struct al_common_dev *dev)
  * Returns: true if firmware is valid, false otherwise
  */
 static bool validate_firmware(struct al_common_dev *dev,
-			      const struct firmware *fw, struct boot_header *bh)
+			      const struct firmware *fw, union boot_header *bh)
 {
-	const struct boot_header *fw_bh;
+	const union boot_header *fw_bh;
+	struct boot_header_vtable vbh;
+	bool isBootHeaderVersionValid = false;
 
-	if (!fw || !fw->data || fw->size < sizeof(struct boot_header)) {
-		common_err(dev, "Firmware too small: %zu bytes\n", fw->size);
+	if (!fw || !fw->data) {
+		common_err(dev, "Invalid Firmware address: %zu bytes\n",
+			   fw->size);
 		return false;
 	}
 
 	/* Parse boot header from firmware */
-	fw_bh = (const struct boot_header *)(fw->data + AL_BOOT_HEADER_OFFSET);
+	fw_bh = (const union boot_header *)(fw->data + AL_BOOT_HEADER_OFFSET);
+#ifdef BOOT_HEADER_COMPATIBILITY
+	isBootHeaderVersionValid |=
+		(get_boot_header_bh_version(fw_bh) == AL_BOOT_VERSION(2, 0, 0));
+	isBootHeaderVersionValid |=
+		(get_boot_header_bh_version(fw_bh) == AL_BOOT_VERSION(2, 1, 0));
+#endif
+	isBootHeaderVersionValid |=
+		(get_boot_header_bh_version(fw_bh) == AL_BOOT_VERSION(2, 2, 0));
+	if (!isBootHeaderVersionValid) {
+		common_err(dev, "Invalid Boot Header Version: %u, %u, %u\n",
+			   AL_BOOT_MAJOR(get_boot_header_bh_version(fw_bh)),
+			   AL_BOOT_MINOR(get_boot_header_bh_version(fw_bh)),
+			   AL_BOOT_PATCH(get_boot_header_bh_version(fw_bh)));
+		return false;
+	}
+	set_boot_header_version(&vbh, fw_bh);
+
+	if (fw->size < vbh.get_boot_header_size()) {
+		common_err(dev, "Firmware too small: %zu bytes\n", fw->size);
+		return false;
+	}
 
 	/* Validate machine ID */
-	if (fw_bh->machine_id != MACHINE_ID_1 &&
-	    fw_bh->machine_id != MACHINE_ID_2) {
+	if (vbh.get_boot_header_machine_id(fw_bh) != MACHINE_ID_1 &&
+	    vbh.get_boot_header_machine_id(fw_bh) != MACHINE_ID_2) {
 		common_err(dev, "Invalid machine_id: %llu\n",
-			   fw_bh->machine_id);
+			   vbh.get_boot_header_machine_id(fw_bh));
 		return false;
 	}
 
 	/* Validate mailbox magic numbers */
-	if (fw_bh->h2m.magic != MAILBOX_IFT_MAGIC_H2M) {
+	if (vbh.get_boot_header_h2m(fw_bh).magic != MAILBOX_IFT_MAGIC_H2M) {
 		common_err(dev, "Invalid H2M mailbox magic: 0x%08x\n",
-			   fw_bh->h2m.magic);
+			   vbh.get_boot_header_h2m(fw_bh).magic);
 		return false;
 	}
 
-	if (fw_bh->m2h.magic != MAILBOX_IFT_MAGIC_M2H) {
+	if (vbh.get_boot_header_m2h(fw_bh).magic != MAILBOX_IFT_MAGIC_M2H) {
 		common_err(dev, "Invalid M2H mailbox magic: 0x%08x\n",
-			   fw_bh->m2h.magic);
+			   vbh.get_boot_header_m2h(fw_bh).magic);
 		return false;
 	}
 
 	/* Copy the firmware boot_header*/
-	memcpy(bh, fw_bh, sizeof(*bh));
+	memcpy(bh, fw_bh, vbh.get_boot_header_size());
 
-	common_dbg(
+	common_info(
 		dev,
-		"Firmware validated: model=%s, version=0x%08x, machine_id=%llu\n",
-		bh->model, bh->fw_version, bh->machine_id);
+		"Firmware validated: model=%s, version=0x%08x, machine_id=%llu, boot_header=%d.%d.%d\n",
+		vbh.get_boot_header_model(bh),
+		vbh.get_boot_header_fw_version(bh),
+		vbh.get_boot_header_machine_id(bh),
+		AL_BOOT_MAJOR(get_boot_header_bh_version(bh)),
+		AL_BOOT_MINOR(get_boot_header_bh_version(bh)),
+		AL_BOOT_PATCH(get_boot_header_bh_version(bh)));
 
 	return true;
 }
@@ -389,12 +476,15 @@ static bool validate_firmware(struct al_common_dev *dev,
 static int copy_firmware_to_mcu(struct al_common_dev *dev,
 				struct al_mcu_instance *mcu,
 				const struct firmware *fw,
-				struct boot_header *bh)
+				union boot_header *bh)
 {
-	const u32 *src;
-	u32 *dst;
-	size_t i, num_words;
-	struct boot_header *bh_dst;
+	const void *src;
+	void *dst;
+	size_t i;
+	union boot_header *bh_dst;
+	struct imb_boot *imb_info;
+	struct boot_header_vtable vbh;
+	set_boot_header_version(&vbh, bh);
 
 	if (!mcu->fw_cpu_mem) {
 		common_err(dev, "MCU %d: No DMA memory allocated\n",
@@ -402,52 +492,44 @@ static int copy_firmware_to_mcu(struct al_common_dev *dev,
 		return -ENOMEM;
 	}
 
-	/* Copy firmware data word by word with endianness conversion */
-	src = (const u32 *)fw->data;
-	dst = (u32 *)mcu->fw_cpu_mem;
-	num_words = fw->size / sizeof(u32);
+	src = (const void *)fw->data;
+	dst = (void *)mcu->fw_cpu_mem;
 
-	for (i = 0; i < num_words; i++)
-		dst[i] = le32_to_cpu(src[i]);
-
-	/* Handle remaining bytes if firmware size is not word-aligned */
-	if (fw->size % sizeof(u32)) {
-		size_t remaining = fw->size % sizeof(u32);
-		u8 *dst_byte = (u8 *)&dst[num_words];
-		const u8 *src_byte = (const u8 *)&src[num_words];
-
-		for (i = 0; i < remaining; i++)
-			dst_byte[i] = src_byte[i];
-	}
+	memcpy(dst, src, fw->size);
 
 	/* Update boot header in firmware copy with runtime data */
-	bh_dst = (struct boot_header *)((u8 *)mcu->fw_cpu_mem +
-					AL_BOOT_HEADER_OFFSET);
+	bh_dst = (union boot_header *)((u8 *)mcu->fw_cpu_mem +
+				       AL_BOOT_HEADER_OFFSET);
 
 	/* Fill the mcu index */
-	bh_dst->mcu_id = mcu->mcu_id;
-	bh_dst->imb_info.num_mcus = dev->num_mcus;
-
+	if (get_boot_header_bh_version(bh) >= AL_BOOT_VERSION(2, 1, 0)) {
+		vbh.set_boot_header_mcu_id(bh_dst, mcu->mcu_id);
+		vbh.get_boot_header_imb_info(bh_dst)->num_mcus = dev->num_mcus;
+	}
 	/* Fill runtime data in boot header */
-	mcu->apb_addr = (bh->machine_id == MACHINE_ID_2) ? mcu->apb_addr :
-							   dev->regs_info.start;
-	bh_dst->ip_start = mcu->apb_addr + MACHINE_ID_2_IP_OFFSET;
-	bh_dst->ip_end = bh_dst->ip_start + resource_size(&dev->regs_info);
+	mcu->apb_addr = (vbh.get_boot_header_machine_id(bh) == MACHINE_ID_2) ?
+				mcu->apb_addr :
+				dev->regs_info.start;
+	vbh.set_boot_header_ip_start(bh_dst,
+				     mcu->apb_addr + MACHINE_ID_2_IP_OFFSET);
+	vbh.set_boot_header_ip_end(bh_dst,
+				   mcu->apb_addr + MACHINE_ID_2_IP_OFFSET +
+					   resource_size(&dev->regs_info));
 
 	/* Keep the default clk_rate in case the clk is not specified */
 	if (mcu->clk_rate)
-		bh_dst->mcu_clk_rate = mcu->clk_rate;
+		vbh.set_boot_header_mcu_clk_rate(bh_dst, mcu->clk_rate);
 
+	imb_info = vbh.get_boot_header_imb_info(bh_dst);
 	if (dev->num_mcus > 1) {
 		for (i = 0; i < dev->num_mcus; i++)
-			bh_dst->imb_info.imailbox_addrs[i] =
-				dev->mcus[i].imb.phys;
+			imb_info->imailbox_addrs[i] = dev->mcus[i].imb.phys;
 	}
 
 	/* Ensure data is written to memory */
 	wmb();
 
-	if (bh->machine_id == MACHINE_ID_2) {
+	if (vbh.get_boot_header_machine_id(bh) == MACHINE_ID_2) {
 		/* Configure MCU peripheral address */
 		common_writel(mcu, AL_CODEC_MCU_PERIPHERAL_ADDR_MSB,
 			      upper_32_bits(mcu->apb_addr));
@@ -468,12 +550,13 @@ static int copy_firmware_to_mcu(struct al_common_dev *dev,
 	common_dbg(
 		dev,
 		"MCU %d: Firmware copied, ip_start=0x%llx, ip_end=0x%llx, clk_rate=%lu, apb_addr=0x%llx, I/D offset=0x%llx\n",
-		mcu->mcu_id, bh_dst->ip_start, bh_dst->ip_end, mcu->clk_rate,
+		mcu->mcu_id, vbh.get_boot_header_ip_start(bh_dst),
+		vbh.get_boot_header_ip_end(bh_dst), mcu->clk_rate,
 		mcu->apb_addr, mcu->offset);
 
 	/* Store firmware version */
-	mcu->fw_version = bh->fw_version;
-	dev->fw_version = bh->fw_version;
+	mcu->fw_version = vbh.get_boot_header_fw_version(bh);
+	dev->fw_version = vbh.get_boot_header_fw_version(bh);
 
 	return 0;
 }
@@ -492,21 +575,27 @@ static int copy_firmware_to_mcu(struct al_common_dev *dev,
  */
 static int init_mcu_mailbox(struct al_common_dev *dev,
 			    struct al_mcu_instance *mcu,
-			    const struct boot_header *bh)
+			    const union boot_header *bh)
 {
 	char *mb_h2m_addr;
 	char *mb_m2h_addr;
 	size_t mb_h2m_size;
 	size_t mb_m2h_size;
+	struct boot_header_vtable vbh;
+	set_boot_header_version(&vbh, bh);
 
 	/* Calculate mailbox addresses and sizes */
 	mb_h2m_addr =
-		(char *)mcu->fw_cpu_mem + (bh->h2m.start - bh->vaddr_start);
-	mb_h2m_size = bh->h2m.end - bh->h2m.start;
+		(char *)mcu->fw_cpu_mem + (vbh.get_boot_header_h2m(bh).start -
+					   vbh.get_boot_header_vaddr_start(bh));
+	mb_h2m_size = vbh.get_boot_header_h2m(bh).end -
+		      vbh.get_boot_header_h2m(bh).start;
 
 	mb_m2h_addr =
-		(char *)mcu->fw_cpu_mem + (bh->m2h.start - bh->vaddr_start);
-	mb_m2h_size = bh->m2h.end - bh->m2h.start;
+		(char *)mcu->fw_cpu_mem + (vbh.get_boot_header_m2h(bh).start -
+					   vbh.get_boot_header_vaddr_start(bh));
+	mb_m2h_size = vbh.get_boot_header_m2h(bh).end -
+		      vbh.get_boot_header_m2h(bh).start;
 
 	/* Initialize mailboxes */
 	codec_mb_init(mcu->regs, &mcu->mb_h2m, mb_h2m_addr, mb_h2m_size,
@@ -532,12 +621,13 @@ static int init_mcu_mailbox(struct al_common_dev *dev,
  * Returns: 0 on success, negative error code on failure
  */
 static int start_mcu(struct al_common_dev *dev, struct al_mcu_instance *mcu,
-		     const struct boot_header *bh)
+		     const union boot_header *bh)
 {
 	/* Calculate physical boot address */
 	u64 boot_addr = get_machine_boot_addr(dev, mcu, bh);
 	/* Estimate the boot time using the clk rate */
-	u64 boot_timeout = max(estimate_boot_timeout(mcu->clk_rate), (u32)2000);
+	u64 boot_timeout = max(estimate_boot_timeout(mcu->clk_rate),
+			       (u32)AL_CODEC_MCU_USER_BOOT_TIMEOUT_VALUE_IN_MS);
 
 	/* Configure MCU boot address */
 	common_writel(mcu, AL_CODEC_MCU_BOOT_ADDR_MSB,
@@ -546,7 +636,7 @@ static int start_mcu(struct al_common_dev *dev, struct al_mcu_instance *mcu,
 		      lower_32_bits(boot_addr));
 
 	/* Start MCU clock and release reset */
-	common_writel(mcu, AL_CODEC_MCU_CLK, AL_CODEC_REG_ENABLE);
+	common_writel(mcu, AL_CODEC_MCU_CLK, BIT(0));
 
 	/* This should be set, or the irq handler will disable the irq*/
 	mcu->active = true;
@@ -576,8 +666,9 @@ static int start_mcu(struct al_common_dev *dev, struct al_mcu_instance *mcu,
 static int load_firmware_to_mcus(struct al_common_dev *dev,
 				 const struct firmware *fw)
 {
-	struct boot_header bh;
+	union boot_header bh;
 	struct al_mcu_instance *mcu;
+	struct boot_header_vtable vbh;
 	u32 i;
 	int ret;
 
@@ -587,11 +678,14 @@ static int load_firmware_to_mcus(struct al_common_dev *dev,
 		return -EINVAL;
 	}
 
+	set_boot_header_version(&vbh, &bh);
+
 	/* Allocate DMA memory and copy firmware for each MCU */
 	for (i = 0; i < dev->num_mcus; i++) {
 		mcu = &dev->mcus[i];
 
-		mcu->fw_size = bh.vaddr_end - bh.vaddr_start;
+		mcu->fw_size = vbh.get_boot_header_vaddr_end(&bh) -
+			       vbh.get_boot_header_vaddr_start(&bh);
 		mcu->fw_cpu_mem = common_dma_alloc(
 			dev, mcu->fw_size, &mcu->fw_phys_addr, GFP_KERNEL);
 		if (IS_ERR(mcu->fw_cpu_mem)) {
@@ -887,8 +981,7 @@ static int parse_mcu_subnode(struct al_common_dev *dev,
 	/* Parse optional MCU name */
 	ret = of_property_read_string(mcu_node, "mcu-name", &name);
 	if (ret == 0) {
-		strncpy(mcu->name, name, sizeof(mcu->name) - 1);
-		mcu->name[sizeof(mcu->name) - 1] = '\0';
+		strscpy(mcu->name, name, sizeof(mcu->name));
 	} else {
 		snprintf(mcu->name, sizeof(mcu->name), "MCU%d", mcu_id);
 	}
@@ -1014,7 +1107,7 @@ static int parse_single_mcu_dt(struct al_common_dev *dev)
 	mcu->is_master = true;
 	mcu->active = false;
 	init_completion(&mcu->done);
-	strncpy(mcu->name, "MCU0", sizeof(mcu->name));
+	strscpy(mcu->name, "MCU0", sizeof(mcu->name));
 
 	/* Parse APB address */
 	res = platform_get_resource_byname(dev->pdev, IORESOURCE_MEM, "apb");
@@ -1145,11 +1238,11 @@ static void handle_get_cma_req(struct al_mcu_instance *mcu,
 	struct msg_itf_get_cma_req req = { 0 };
 	struct al_dma_buf *buf = NULL;
 	int ret;
+	// Always read aligned payload
+	size_t aligned_len = ALIGN(hdr->payload_len, 64);
 
 	reply.reply.phyAddr = 0;
 
-	// Always read aligned payload
-	size_t aligned_len = ALIGN(hdr->payload_len, 64);
 	ret = al_mcu_get_data(mcu, (char *)&req, aligned_len);
 	if (ret) {
 		common_err(dev, "Unable to get cma req\n");
@@ -1197,9 +1290,9 @@ static void handle_put_cma_req(struct al_mcu_instance *mcu,
 	struct msg_itf_put_cma_req req = { 0 };
 	struct al_dma_buf *buf = NULL;
 	int ret;
+	size_t aligned_len = ALIGN(hdr->payload_len, 64);
 
 	reply.reply.ret = -1;
-	size_t aligned_len = ALIGN(hdr->payload_len, 64);
 	ret = al_mcu_get_data(mcu, (char *)&req, aligned_len);
 	if (ret) {
 		common_err(dev, "Unable to put cma req\n");
