@@ -28,11 +28,6 @@ static inline int get_free_space(struct codec_mb *mb)
 	return mb->size - get_used_space(mb) - 1;
 }
 
-static inline int has_enough_space(struct codec_mb *mb, size_t len)
-{
-	return get_free_space(mb) >= len;
-}
-
 static void copy_to_mb(struct codec_mb *mb, char *data, size_t len)
 {
 	u32 head = readl(mb->hw);
@@ -100,8 +95,19 @@ void codec_mb_init(void __iomem *base_reg, struct codec_mb *mb, char *addr,
 
 int codec_mb_send(struct codec_mb *mb, char *data, size_t len)
 {
+	int free;
+
 	mutex_lock(&mb->lock);
-	if (!has_enough_space(mb, len)) {
+	free = get_free_space(mb);
+	/* copy_to_mb() advances the head by ALIGN(len, 64), so free space must
+	 * be checked against that same aligned length, not the raw len.
+	 */
+	if (free >= (int)len && free < (int)ALIGN(len, 64))
+		pr_warn_ratelimited(
+			"al_codec_mb %p: near-miss ring overrun avoided: free=%d raw_len=%zu aligned_len=%lu\n",
+			mb, free, len, ALIGN(len, 64));
+
+	if (free < (int)ALIGN(len, 64)) {
 		mutex_unlock(&mb->lock);
 		return -ENOMEM;
 	}

@@ -835,7 +835,7 @@ static void mcu_irq_work_handler(struct work_struct *work)
 	struct al_mcu_instance *mcu =
 		container_of(work, struct al_mcu_instance, irq_work);
 
-	if (!mcu->active)
+	if (!READ_ONCE(mcu->active))
 		return;
 
 	/* Process messages from this MCU */
@@ -863,7 +863,7 @@ static irqreturn_t common_hardirq_handler(int irq, void *arg)
 	for (i = 0; i < dev->num_mcus; i++) {
 		struct al_mcu_instance *mcu = &dev->mcus[i];
 
-		if (!mcu->active)
+		if (!READ_ONCE(mcu->active) || !READ_ONCE(dev->irq_wq))
 			continue;
 
 		irq_status = common_readl(mcu, AL_CODEC_IRQ_STATUS_CLEAR);
@@ -1327,6 +1327,8 @@ static void handle_write_req(struct al_mcu_instance *mcu,
 	struct al_common_dev *dev = mcu->dev;
 	struct msg_itf_write_req *req = NULL;
 	size_t aligned_size = ALIGN(hdr->payload_len, 64);
+	char *msg;
+	size_t len;
 	int ret;
 
 	// +1 for zero-terminated string safety
@@ -1346,9 +1348,29 @@ static void handle_write_req(struct al_mcu_instance *mcu,
 		return;
 	}
 
-	pr_cont("%s: %s", mcu->name,
-		(char *)(req +
-			 1)); // Assuming payload starts after struct for legacy API
+	/* Payload (the formatted string) follows the fixed request header. */
+	msg = (char *)(req + 1);
+	if (aligned_size <= sizeof(*req)) {
+		kfree(req);
+		return;
+	}
+	len = strnlen(msg, aligned_size - sizeof(*req));
+	while (len && (msg[len - 1] == '\n' || msg[len - 1] == '\r'))
+		msg[--len] = '\0';
+
+	/*
+	 * pr_cont() is unreliable here: firmware writes arrive from the mailbox
+	 * IRQ path with no line already in progress, so the text is dropped or
+	 * interleaved. Emit a complete line instead, otherwise MCU asserts
+	 * (which are reported via stdout) never reach dmesg.
+	 */
+	if (len) {
+		if (req->fd == 2)
+			common_err(dev, "%s: %s\n", mcu->name, msg);
+		else
+			common_info(dev, "%s: %s\n", mcu->name, msg);
+	}
+
 	kfree(req);
 }
 
@@ -1550,8 +1572,13 @@ int al_common_probe(struct platform_device *pdev, struct al_common_dev *dev,
 		return ret;
 	}
 
-	/* Create high-priority workqueue ONCE */
-	dev->irq_wq = create_singlethread_workqueue("al_codec_irq");
+	/* Create high-priority workqueue ONCE.
+	 * WQ_HIGHPRI matters here: this worker drains the M2H mailbox ring.
+	 * create_singlethread_workqueue() is normal-priority and can be
+	 * starved by CPU-heavy userspace decode/encode work, letting the
+	 * ring fill up close to capacity under concurrent load (CR-1279624).
+	 */
+	dev->irq_wq = alloc_ordered_workqueue("al_codec_irq", WQ_HIGHPRI);
 	if (!dev->irq_wq) {
 		common_err(dev, "Failed to create IRQ workqueue\n");
 		return -ENOMEM;
@@ -1611,6 +1638,23 @@ int al_common_remove(struct al_common_dev *dev)
 {
 	u32 i;
 
+	/* The IRQ stays registered until devm unwinds after this function, and
+	 * mcu_irq_work_handler walks the mailboxes that live in the firmware DMA
+	 * region. Silence the MCUs and drain the worker before freeing any of it,
+	 * otherwise a late interrupt faults on unmapped memory during rmmod. */
+	for (i = 0; i < dev->num_mcus; i++)
+		WRITE_ONCE(dev->mcus[i].active, false);
+
+	common_reset(dev);
+
+	for (i = 0; i < dev->num_mcus; i++)
+		cancel_work_sync(&dev->mcus[i].irq_work);
+
+	if (dev->irq_wq) {
+		destroy_workqueue(dev->irq_wq);
+		dev->irq_wq = NULL;
+	}
+
 	/* Cleanup DMA buffers */
 	common_dma_buf_cleanup(dev);
 
@@ -1631,18 +1675,7 @@ int al_common_remove(struct al_common_dev *dev)
 		/* Disable and put clock */
 		if (!IS_ERR(mcu->clk) && mcu->clk_rate)
 			clk_disable_unprepare(mcu->clk);
-
-		/* Cancel all pending work for each MCU */
-		cancel_work_sync(&mcu->irq_work);
 	}
-
-	/* Reset device */
-	common_reset(dev);
-
-	/* Flush and destroy workqueue */
-	flush_workqueue(dev->irq_wq);
-	destroy_workqueue(dev->irq_wq);
-	dev->irq_wq = NULL;
 
 	common_info(dev, "Device removed\n");
 

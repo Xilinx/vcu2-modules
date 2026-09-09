@@ -45,7 +45,7 @@ enum {
 };
 
 /* padding is important here since it insure that sizeof(struct msg_itf_header)
- * as same value as get_size_struct_msg_itf_header(). This assertion is assumed
+ * as same value as get_size_struct_msg_interface_header(). This assertion is assumed
  * in driver and fw code.
  * Note that we want to avoid packed structure since riscv compiler will access
  * those struct byte per byte.
